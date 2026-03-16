@@ -4,8 +4,27 @@
 #include <memory>
 
 #ifdef _WIN32
+#if defined(__has_include)
+#if __has_include("SI_errors.h")
 #include "SI_errors.h"
+#elif __has_include("SI_erros.h")
+#include "SI_erros.h"
+#else
+#error "SpecSensor header not found: expected SI_errors.h (or SI_erros.h). Check SpecSensorSdkDir/include in the .vcxproj."
+#endif
+#else
+#include "SI_errors.h"
+#endif
+
+#if defined(__has_include)
+#if __has_include("SI_sensor.h")
 #include "SI_sensor.h"
+#else
+#error "SpecSensor header not found: expected SI_sensor.h. Check SpecSensorSdkDir/include in the .vcxproj."
+#endif
+#else
+#include "SI_sensor.h"
+#endif
 
 class SpecSensorApiSdk final : public ISpecSensorApi {
 public:
