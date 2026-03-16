@@ -9,6 +9,10 @@
 #include "SI_errors.h"
 #elif __has_include("SI_erros.h")
 #include "SI_erros.h"
+#elif __has_include("C:/Program Files (x86)/Specim/SDKs/SpecSensor/2020_519/bin/SI_errors.h")
+#include "C:/Program Files (x86)/Specim/SDKs/SpecSensor/2020_519/bin/SI_errors.h"
+#elif __has_include("C:/Program Files (x86)/Specim/SDKs/SpecSensor/2020_519/bin/SI_erros.h")
+#include "C:/Program Files (x86)/Specim/SDKs/SpecSensor/2020_519/bin/SI_erros.h"
 #elif __has_include("C:/Program Files (x86)/Specim/SDKs/SpecSensor/include/SI_errors.h")
 #include "C:/Program Files (x86)/Specim/SDKs/SpecSensor/include/SI_errors.h"
 #elif __has_include("C:/Program Files/Specim/SDKs/SpecSensor/include/SI_errors.h")
@@ -27,6 +31,8 @@
 #if defined(__has_include)
 #if __has_include("SI_sensor.h")
 #include "SI_sensor.h"
+#elif __has_include("C:/Program Files (x86)/Specim/SDKs/SpecSensor/2020_519/bin/SI_sensor.h")
+#include "C:/Program Files (x86)/Specim/SDKs/SpecSensor/2020_519/bin/SI_sensor.h"
 #elif __has_include("C:/Program Files (x86)/Specim/SDKs/SpecSensor/include/SI_sensor.h")
 #include "C:/Program Files (x86)/Specim/SDKs/SpecSensor/include/SI_sensor.h"
 #elif __has_include("C:/Program Files/Specim/SDKs/SpecSensor/include/SI_sensor.h")
