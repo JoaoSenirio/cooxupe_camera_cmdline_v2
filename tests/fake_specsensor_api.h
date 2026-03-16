@@ -73,6 +73,13 @@ public:
         return 0;
     }
 
+    int SetString(const std::wstring& feature, const std::wstring& value) override {
+        if (feature == L"Camera.CalibrationPack") {
+            calibration_pack = value;
+        }
+        return 0;
+    }
+
     int SetEnumIndex(const std::wstring& feature, int value) override {
         if (feature == L"Camera.Binning.Spatial") {
             spatial_binning_index = value;
@@ -138,6 +145,7 @@ public:
     int open_index = -1;
     double exposure_time = 0.0;
     double frame_rate = 0.0;
+    std::wstring calibration_pack;
     int spatial_binning_index = -1;
     int spectral_binning_index = -1;
     std::int64_t frame_size_bytes = 4096;

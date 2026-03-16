@@ -19,6 +19,7 @@ public:
 
     virtual int Command(const std::wstring& feature) = 0;
     virtual int SetFloat(const std::wstring& feature, double value) = 0;
+    virtual int SetString(const std::wstring& feature, const std::wstring& value) = 0;
     virtual int SetEnumIndex(const std::wstring& feature, int value) = 0;
     virtual int GetInt(const std::wstring& feature, std::int64_t* value) = 0;
 

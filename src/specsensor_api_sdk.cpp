@@ -145,6 +145,11 @@ public:
         return SI_SetFloat(handle_, feature.c_str(), value);
     }
 
+    int SetString(const std::wstring& feature, const std::wstring& value) override {
+        std::wstring mutable_value = value;
+        return SI_SetString(handle_, feature.c_str(), mutable_value.data());
+    }
+
     int SetEnumIndex(const std::wstring& feature, int value) override {
         return SI_SetEnumIndex(handle_, feature.c_str(), value);
     }
@@ -206,6 +211,7 @@ public:
     int Close() override { return 0; }
     int Command(const std::wstring&) override { return -1; }
     int SetFloat(const std::wstring&, double) override { return -1; }
+    int SetString(const std::wstring&, const std::wstring&) override { return -1; }
     int SetEnumIndex(const std::wstring&, int) override { return -1; }
     int GetInt(const std::wstring&, std::int64_t*) override { return -1; }
     int CreateBuffer(std::int64_t, void**) override { return -1; }

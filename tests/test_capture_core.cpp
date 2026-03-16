@@ -38,6 +38,7 @@ int TestBinningMap() {
 
 int TestWorkflowWithFakeApi() {
     AppConfig config = MakeDefaultConfig();
+    config.device_index = 0;
     config.capture_seconds = 1;
     config.dark_frames = 5;
     config.min_buffers_required = 1;

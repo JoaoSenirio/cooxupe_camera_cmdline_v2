@@ -25,6 +25,8 @@ bool ValidateConfig(const AppConfig& config, std::string* error) {
         oss << "binning_spatial must be one of: 1, 2, 4, 8";
     } else if (!IsValidBinning(config.binning_spectral)) {
         oss << "binning_spectral must be one of: 1, 2, 4, 8";
+    } else if (config.calibration_scp_path.empty()) {
+        oss << "calibration_scp_path must not be empty";
     } else if (config.output_dir.empty()) {
         oss << "output_dir must not be empty";
     } else if (config.rgb_wavelength_nm[0] <= 0 ||
