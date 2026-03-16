@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -146,8 +147,13 @@ public:
     }
 
     int SetString(const std::wstring& feature, const std::wstring& value) override {
-        std::wstring mutable_value = value;
-        return SI_SetString(handle_, feature.c_str(), mutable_value.data());
+        std::vector<SI_WC> writable;
+        writable.reserve(value.size() + 1);
+        for (wchar_t ch : value) {
+            writable.push_back(static_cast<SI_WC>(ch));
+        }
+        writable.push_back(0);
+        return SI_SetString(handle_, feature.c_str(), writable.data());
     }
 
     int SetEnumIndex(const std::wstring& feature, int value) override {
