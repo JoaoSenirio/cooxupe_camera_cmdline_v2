@@ -50,6 +50,10 @@
 #if !defined(SI_System) && defined(SI_SYSTEM)
 #define SI_System SI_SYSTEM
 #endif
+#if !defined(SI_SYSTEM) && !defined(SI_System)
+#define SI_SYSTEM 0
+#define SI_System 0
+#endif
 
 class SpecSensorApiSdk final : public ISpecSensorApi {
 public:
