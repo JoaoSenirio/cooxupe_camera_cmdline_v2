@@ -1,9 +1,12 @@
 #include "specsensor_api.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 
 #ifdef _WIN32
+#include <windows.h>
+
 #if defined(__has_include)
 #if __has_include("SI_errors.h")
 #include "SI_errors.h"
@@ -55,9 +58,30 @@
 #define SI_System 0
 #endif
 
+namespace {
+
+void ConfigureSpecSensorDllSearchPath() {
+    const wchar_t* candidates[] = {
+        L"C:\\Program Files (x86)\\Specim\\SDKs\\SpecSensor\\2020_519\\bin\\x64",
+        L"C:\\Program Files\\Specim\\SDKs\\SpecSensor\\2020_519\\bin\\x64",
+        L"C:\\Program Files (x86)\\Specim\\SDKs\\SpecSensor\\bin\\x64",
+        L"C:\\Program Files\\Specim\\SDKs\\SpecSensor\\bin\\x64",
+    };
+
+    for (const wchar_t* path : candidates) {
+        if (std::filesystem::exists(path)) {
+            SetDllDirectoryW(path);
+            return;
+        }
+    }
+}
+
+}  // namespace
+
 class SpecSensorApiSdk final : public ISpecSensorApi {
 public:
     int Load(const std::wstring& license_path) override {
+        ConfigureSpecSensorDllSearchPath();
         const int error = SI_Load(license_path.c_str());
         if (error == 0) {
             loaded_ = true;
