@@ -1,0 +1,27 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "specsensor_cli", "specsensor_cli.vcxproj", "{9E042458-FAE2-4A3D-B1A9-0229C49D4200}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "windows_pipe_client", "windows_pipe_client.vcxproj", "{3C7FA445-8037-4E99-8A32-D0F41F6E1808}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{9E042458-FAE2-4A3D-B1A9-0229C49D4200}.Debug|x64.ActiveCfg = Debug|x64
+		{9E042458-FAE2-4A3D-B1A9-0229C49D4200}.Debug|x64.Build.0 = Debug|x64
+		{9E042458-FAE2-4A3D-B1A9-0229C49D4200}.Release|x64.ActiveCfg = Release|x64
+		{9E042458-FAE2-4A3D-B1A9-0229C49D4200}.Release|x64.Build.0 = Release|x64
+		{3C7FA445-8037-4E99-8A32-D0F41F6E1808}.Debug|x64.ActiveCfg = Debug|x64
+		{3C7FA445-8037-4E99-8A32-D0F41F6E1808}.Debug|x64.Build.0 = Debug|x64
+		{3C7FA445-8037-4E99-8A32-D0F41F6E1808}.Release|x64.ActiveCfg = Release|x64
+		{3C7FA445-8037-4E99-8A32-D0F41F6E1808}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

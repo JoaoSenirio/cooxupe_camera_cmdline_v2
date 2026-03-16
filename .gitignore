@@ -1,0 +1,15 @@
+# Local test artifacts
+tests/build/
+
+# Visual Studio
+.vs/
+x64/
+*.user
+*.suo
+
+# Generic binaries
+*.exe
+*.dll
+*.pdb
+*.obj
+*.ilk
