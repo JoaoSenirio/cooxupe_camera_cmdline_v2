@@ -22,7 +22,7 @@ struct AppConfig {
 inline AppConfig MakeDefaultConfig() {
     AppConfig config{};
     config.license_path = L"C:/Users/Public/Documents/Specim/SpecSensor.lic";
-    config.device_index = 0;
+    config.device_index = 10;
     config.exposure_ms = 4.0;
     config.frame_rate_hz = 120.0;
     config.binning_spatial = 1;
