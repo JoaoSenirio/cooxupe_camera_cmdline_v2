@@ -1,7 +1,6 @@
 #include "specsensor_api.h"
 
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 
 #ifdef _WIN32
@@ -60,6 +59,18 @@
 
 namespace {
 
+bool DirectoryExists(const wchar_t* path) {
+    if (path == nullptr || *path == 0) {
+        return false;
+    }
+
+    const DWORD attrs = GetFileAttributesW(path);
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+    return (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
 void ConfigureSpecSensorDllSearchPath() {
     const wchar_t* candidates[] = {
         L"C:\\Program Files (x86)\\Specim\\SDKs\\SpecSensor\\2020_519\\bin\\x64",
@@ -69,7 +80,7 @@ void ConfigureSpecSensorDllSearchPath() {
     };
 
     for (const wchar_t* path : candidates) {
-        if (std::filesystem::exists(path)) {
+        if (DirectoryExists(path)) {
             SetDllDirectoryW(path);
             return;
         }
