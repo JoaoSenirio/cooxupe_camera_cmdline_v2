@@ -74,8 +74,12 @@ void PipeCore::stop() {
     }
 
 #ifdef _WIN32
-    HANDLE wake = CreateFileA(pipe_name_.c_str(), GENERIC_READ, 0, nullptr,
+    HANDLE wake = CreateFileA(pipe_name_.c_str(), GENERIC_WRITE, 0, nullptr,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (wake == INVALID_HANDLE_VALUE) {
+        wake = CreateFileA(pipe_name_.c_str(), GENERIC_WRITE | GENERIC_READ, 0, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
     if (wake != INVALID_HANDLE_VALUE) {
         CloseHandle(wake);
     }
