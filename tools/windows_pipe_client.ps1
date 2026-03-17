@@ -40,26 +40,14 @@ function Send-CaptureCommand {
         $client.Connect($ConnectTimeoutMs)
 
         $encoding = New-Object System.Text.UTF8Encoding($false)
-        $writer = New-Object System.IO.StreamWriter($client, $encoding)
-        try {
-            $writer.AutoFlush = $true
-            $command = "CAPTURE $Sample"
-            $writer.WriteLine($command)
-            $writer.Flush()
-            try {
-                $client.WaitForPipeDrain()
-            }
-            catch {
-                Write-Host "[client] WaitForPipeDrain unavailable: $($_.Exception.Message)"
-            }
-
-            $payload = $command + [Environment]::NewLine
-            $bytes = $encoding.GetByteCount($payload)
-            Write-Host "[client] Sent ($bytes bytes UTF-8): $command"
-        }
-        finally {
-            $writer.Dispose()
-        }
+        $command = "CAPTURE $Sample"
+        $payload = $command + "`n"
+        $payloadBytes = $encoding.GetBytes($payload)
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $client.Write($payloadBytes, 0, $payloadBytes.Length)
+        $client.Flush()
+        $stopwatch.Stop()
+        Write-Host "[client] Sent ($($payloadBytes.Length) bytes UTF-8 in $($stopwatch.ElapsedMilliseconds) ms): $command"
     }
     finally {
         $client.Dispose()
