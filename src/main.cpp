@@ -29,6 +29,32 @@ void LogApiFailure(ISpecSensorApi& api, const char* step, int code) {
                << L" msg=\"" << api.GetErrorString(code) << L"\"\n";
 }
 
+bool RunCameraCommand(ISpecSensorApi& api, const wchar_t* command, const char* step) {
+    const int error = api.Command(command);
+    if (error != 0) {
+        LogApiFailure(api, step, error);
+        return false;
+    }
+    std::cout << "[main] " << step << " ok\n";
+    return true;
+}
+
+bool DisposeFrameBuffer(ISpecSensorApi& api, void* frame_buffer) {
+    if (frame_buffer == nullptr) {
+        std::cout << "[main] No frame buffer to dispose\n";
+        return true;
+    }
+
+    std::cout << "[main] Disposing frame buffer\n";
+    const int error = api.DisposeBuffer(frame_buffer);
+    if (error != 0) {
+        LogApiFailure(api, "SI_DisposeBuffer", error);
+        return false;
+    }
+    std::cout << "[main] Frame buffer disposed\n";
+    return true;
+}
+
 void PrintUsage() {
     std::cout << "Usage:\n"
               << "  specsensor_cli.exe              # Connect + configure + 10x light/dark capture test\n"
@@ -143,22 +169,22 @@ bool CaptureFrames(const AppConfig& config, ISpecSensorApi& api) {
     }
     std::cout << "[main] Frame buffer allocated: " << buffer_size << " bytes\n";
 
-    error = api.Command(L"Acquisition.Start");
-    if (error != 0) {
-        LogApiFailure(api, "Acquisition.Start", error);
-        api.DisposeBuffer(frame_buffer);
+    if (!RunCameraCommand(api, L"Acquisition.Start", "Acquisition.Start")) {
+        DisposeFrameBuffer(api, frame_buffer);
         return false;
     }
-    std::cout << "[main] Acquisition started\n";
 
-    error = api.Command(L"Camera.OpenShutter");
-    if (error != 0) {
-        LogApiFailure(api, "Camera.OpenShutter", error);
-        api.Command(L"Acquisition.Stop");
-        api.DisposeBuffer(frame_buffer);
+    if (!RunCameraCommand(api, L"Acquisition.RingBuffer.Sync", "Acquisition.RingBuffer.Sync (before LIGHT)")) {
+        RunCameraCommand(api, L"Acquisition.Stop", "Acquisition.Stop");
+        DisposeFrameBuffer(api, frame_buffer);
         return false;
     }
-    std::cout << "[main] Shutter opened\n";
+
+    if (!RunCameraCommand(api, L"Camera.OpenShutter", "Camera.OpenShutter")) {
+        RunCameraCommand(api, L"Acquisition.Stop", "Acquisition.Stop");
+        DisposeFrameBuffer(api, frame_buffer);
+        return false;
+    }
 
     std::int64_t light_buffers = 0;
     std::int64_t dark_buffers = 0;
@@ -188,21 +214,13 @@ bool CaptureFrames(const AppConfig& config, ISpecSensorApi& api) {
         }
     }
 
-    if (error == 0) {
-        error = api.Command(L"Camera.CloseShutter");
-        if (error != 0) {
-            LogApiFailure(api, "Camera.CloseShutter", error);
-        } else {
-            std::cout << "[main] Shutter closed\n";
-        }
+    if (error == 0 && !RunCameraCommand(api, L"Camera.CloseShutter", "Camera.CloseShutter")) {
+        error = -1;
     }
 
     if (error == 0) {
-        error = api.Command(L"Acquisition.RingBuffer.Sync");
-        if (error != 0) {
-            LogApiFailure(api, "Acquisition.RingBuffer.Sync", error);
-        } else {
-            std::cout << "[main] RingBuffer synchronized before DARK phase\n";
+        if (!RunCameraCommand(api, L"Acquisition.RingBuffer.Sync", "Acquisition.RingBuffer.Sync (before DARK)")) {
+            error = -1;
         }
     }
 
@@ -229,9 +247,13 @@ bool CaptureFrames(const AppConfig& config, ISpecSensorApi& api) {
         }
     }
 
-    api.Command(L"Acquisition.Stop");
+    if (!RunCameraCommand(api, L"Acquisition.Stop", "Acquisition.Stop") && error == 0) {
+        error = -1;
+    }
 
-    api.DisposeBuffer(frame_buffer);
+    if (!DisposeFrameBuffer(api, frame_buffer) && error == 0) {
+        error = -1;
+    }
 
     const std::int64_t total_buffers = light_buffers + dark_buffers;
     const bool workflow_ok = (error == 0) && (light_buffers > 0) &&
