@@ -44,6 +44,7 @@ private:
     const AppConfig config_;
     ISpecSensorApi* api_;
     bool initialized_ = false;
+    bool shutdown_done_ = false;
     std::atomic<bool> stop_requested_{false};
 
     mutable std::mutex log_mutex_;

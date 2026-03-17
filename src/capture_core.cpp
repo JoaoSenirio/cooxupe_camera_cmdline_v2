@@ -53,6 +53,7 @@ bool CaptureCore::Initialize() {
         std::cerr << "[capture] API pointer is null\n";
         return false;
     }
+    shutdown_done_ = false;
 
     if (!OpenLogFile()) {
         std::cerr << "[capture] Failed to open log file: " << config_.log_file_path << "\n";
@@ -262,6 +263,9 @@ void CaptureCore::Shutdown() {
     if (api_ == nullptr) {
         return;
     }
+    if (shutdown_done_) {
+        return;
+    }
 
     if (initialized_) {
         const int close_error = api_->Close();
@@ -280,6 +284,7 @@ void CaptureCore::Shutdown() {
     }
 
     initialized_ = false;
+    shutdown_done_ = true;
 }
 
 void CaptureCore::RequestStop() {
