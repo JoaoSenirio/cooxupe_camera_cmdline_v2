@@ -31,7 +31,7 @@ void LogApiFailure(ISpecSensorApi& api, const char* step, int code) {
 
 void PrintUsage() {
     std::cout << "Usage:\n"
-              << "  specsensor_cli.exe              # Connect + configure + light/dark auto capture test\n"
+              << "  specsensor_cli.exe              # Connect + configure + 10x light/dark capture test\n"
               << "  specsensor_cli.exe --run        # Same behavior as default\n";
 }
 
@@ -249,30 +249,27 @@ bool CaptureFrames(const AppConfig& config, ISpecSensorApi& api) {
     return pass;
 }
 
-bool RunConnectConfigureAndCapture(const AppConfig& config) {
-    std::string validation_error;
-    if (!ValidateConfig(config, &validation_error)) {
-        std::cerr << "[main] Invalid configuration: " << validation_error << "\n";
-        return false;
-    }
+bool RunCaptureWorkflowTestLoop(const AppConfig& config, ISpecSensorApi& api, int iterations) {
+    const int test_iterations = (iterations < 10) ? 10 : iterations;
+    int passed_iterations = 0;
 
-    auto api = CreateSpecSensorApi();
-    if (!ConnectCamera(config, *api)) {
-        return false;
-    }
-    if (!ConfigureCameraParameters(config, *api)) {
-        api->Close();
-        api->Unload();
-        return false;
-    }
-
-    std::cout << "[main] Running automatic capture test: light="
-              << config.capture_seconds
+    std::cout << "[main] Running automatic capture workflow loop: iterations="
+              << test_iterations
+              << " light=" << config.capture_seconds
               << "s dark_frames=" << config.dark_frames << "\n";
-    const bool pass = CaptureFrames(config, *api);
-    api->Close();
-    api->Unload();
-    return pass;
+
+    for (int i = 0; i < test_iterations; ++i) {
+        std::cout << "[main] Iteration " << (i + 1) << "/" << test_iterations << "\n";
+        if (!CaptureFrames(config, api)) {
+            std::cout << "[main] Iteration " << (i + 1) << " failed\n";
+            return false;
+        }
+        ++passed_iterations;
+    }
+
+    std::cout << "[main] Capture workflow loop finished. passed="
+              << passed_iterations << "/" << test_iterations << "\n";
+    return passed_iterations == test_iterations;
 }
 
 }  // namespace
@@ -292,5 +289,25 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    return RunConnectConfigureAndCapture(config) ? 0 : 1;
+    std::string validation_error;
+    if (!ValidateConfig(config, &validation_error)) {
+        std::cerr << "[main] Invalid configuration: " << validation_error << "\n";
+        return 1;
+    }
+
+    auto api = CreateSpecSensorApi();
+    if (!ConnectCamera(config, *api)) {
+        return 1;
+    }
+
+    bool pass = false;
+    if (!ConfigureCameraParameters(config, *api)) {
+        pass = false;
+    } else {
+        pass = RunCaptureWorkflowTestLoop(config, *api, 10);
+    }
+
+    api->Close();
+    api->Unload();
+    return pass ? 0 : 1;
 }
