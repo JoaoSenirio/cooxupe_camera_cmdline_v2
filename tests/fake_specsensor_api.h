@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "specsensor_api.h"
@@ -119,6 +121,10 @@ public:
             return -3;
         }
 
+        if (wait_delay_us > 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(wait_delay_us));
+        }
+
         const std::int64_t next = ++current_frame;
         if (frame_size != nullptr) {
             *frame_size = frame_size_bytes;
@@ -149,6 +155,7 @@ public:
     int spatial_binning_index = -1;
     int spectral_binning_index = -1;
     std::int64_t frame_size_bytes = 4096;
+    int wait_delay_us = 0;
     std::wstring load_license_path;
     std::vector<std::wstring> commands;
 

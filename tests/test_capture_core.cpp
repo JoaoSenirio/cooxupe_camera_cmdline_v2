@@ -1,8 +1,4 @@
-#include <chrono>
-#include <condition_variable>
-#include <cstdlib>
 #include <iostream>
-#include <mutex>
 #include <string>
 
 #include "app_config.h"
@@ -42,38 +38,19 @@ int TestWorkflowWithFakeApi() {
     config.capture_seconds = 1;
     config.dark_frames = 5;
     config.min_buffers_required = 1;
+    config.log_file_path = "/tmp/specsensor_cli_test.log";
 
     FakeSpecSensorApi api;
+    api.wait_delay_us = 1000;
     CaptureCore core(config, &api);
 
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool done = false;
-    AcquisitionSummary captured_summary;
-
-    core.set_summary_callback([&](const AcquisitionSummary& summary) {
-        if (summary.sample_name == "sample-A") {
-            std::lock_guard<std::mutex> lock(mutex);
-            captured_summary = summary;
-            done = true;
-            cv.notify_all();
-        }
-    });
-
-    TEST_ASSERT(core.start(), "CaptureCore start should succeed");
+    TEST_ASSERT(core.Initialize(), "CaptureCore initialize should succeed");
 
     AcquisitionJob job;
     job.sample_name = "sample-A";
-    TEST_ASSERT(core.enqueue_job(job), "job enqueue should succeed");
-
-    {
-        std::unique_lock<std::mutex> lock(mutex);
-        const bool completed =
-            cv.wait_for(lock, std::chrono::seconds(5), [&]() { return done; });
-        TEST_ASSERT(completed, "workflow should complete within timeout");
-    }
-
-    core.stop();
+    AcquisitionSummary captured_summary;
+    TEST_ASSERT(core.CaptureSample(job, &captured_summary), "capture sample should succeed");
+    core.Shutdown();
 
     TEST_ASSERT(api.loaded == false, "SDK should be unloaded after stop");
     TEST_ASSERT(api.opened == false, "device should be closed after stop");
@@ -85,9 +62,9 @@ int TestWorkflowWithFakeApi() {
     TEST_ASSERT(api.spectral_binning_index == 0, "spectral binning index must be set");
 
     TEST_ASSERT(api.HasCommand(L"Acquisition.Start"), "must start acquisition");
+    TEST_ASSERT(api.HasCommand(L"Acquisition.RingBuffer.Sync"), "must sync ring buffer");
     TEST_ASSERT(api.HasCommand(L"Camera.OpenShutter"), "must open shutter");
     TEST_ASSERT(api.HasCommand(L"Camera.CloseShutter"), "must close shutter");
-    TEST_ASSERT(api.HasCommand(L"Acquisition.RingBuffer.Sync"), "must sync ring buffer before dark");
     TEST_ASSERT(api.HasCommand(L"Acquisition.Stop"), "must stop acquisition");
 
     TEST_ASSERT(captured_summary.dark_buffers == config.dark_frames,

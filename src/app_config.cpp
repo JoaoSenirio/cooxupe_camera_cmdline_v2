@@ -43,6 +43,8 @@ bool ValidateConfig(const AppConfig& config, std::string* error) {
         oss << "min_buffers_required must be > 0";
     } else if (config.pipe_name.empty()) {
         oss << "pipe_name must not be empty";
+    } else if (config.log_file_path.empty()) {
+        oss << "log_file_path must not be empty";
     }
 
     if (error != nullptr) {

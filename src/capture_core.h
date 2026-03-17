@@ -3,49 +3,51 @@
 
 #include <atomic>
 #include <cstdint>
-#include <functional>
-#include <thread>
+#include <fstream>
+#include <mutex>
+#include <string>
 
 #include "app_config.h"
 #include "specsensor_api.h"
-#include "thread_queue.h"
 #include "types.h"
 
 int BinningValueToEnumIndex(int binning_value);
 
 class CaptureCore {
 public:
-    using SummaryCallback = std::function<void(const AcquisitionSummary&)>;
-
     CaptureCore(const AppConfig& config, ISpecSensorApi* api);
     ~CaptureCore();
 
-    bool start();
-    void stop();
+    bool Initialize();
+    bool CaptureSample(const AcquisitionJob& job, AcquisitionSummary* summary);
+    void Shutdown();
 
-    bool enqueue_job(const AcquisitionJob& job);
-    void set_summary_callback(SummaryCallback callback);
+    void RequestStop();
+    bool StopRequested() const;
+
+    void LogInfo(const std::string& message);
+    void LogError(const std::string& message);
 
 private:
-    void worker_loop();
-    int initialize_sensor();
-    void cleanup_sensor();
+    bool OpenLogFile();
 
-    AcquisitionSummary run_workflow(const AcquisitionJob& job);
-    int wait_for_frame(AcquisitionSummary* summary, CapturePhase phase);
+    bool ConnectCamera();
+    bool ConfigureCameraParameters();
+
+    int RunCameraCommand(const wchar_t* command, const char* step);
+    int DisposeFrameBuffer(void* frame_buffer);
+
+    void LogApiFailure(const char* step, int code);
+    void LogMessage(const char* level, const std::string& message);
+    static std::string Narrow(const wchar_t* text);
 
     const AppConfig config_;
     ISpecSensorApi* api_;
+    bool initialized_ = false;
+    std::atomic<bool> stop_requested_{false};
 
-    ThreadQueue<AcquisitionJob> jobs_;
-    SummaryCallback on_summary_;
-
-    std::thread worker_;
-    std::atomic<bool> started_{false};
-
-    void* frame_buffer_ = nullptr;
-    std::int64_t frame_buffer_size_ = 0;
-    bool sensor_ready_ = false;
+    mutable std::mutex log_mutex_;
+    std::ofstream log_file_;
 };
 
 #endif
