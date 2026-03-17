@@ -1,12 +1,9 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
-#include <mutex>
-#include <queue>
 #include <string>
 
 #include "app_config.h"
-#include "pipe_core.h"
 #include "specsensor_api.h"
 
 namespace {
@@ -34,7 +31,7 @@ void LogApiFailure(ISpecSensorApi& api, const char* step, int code) {
 
 void PrintUsage() {
     std::cout << "Usage:\n"
-              << "  specsensor_cli.exe              # Connect + configure + pipe + capture test\n"
+              << "  specsensor_cli.exe              # Connect + configure + light/dark auto capture test\n"
               << "  specsensor_cli.exe --run        # Same behavior as default\n";
 }
 
@@ -146,35 +143,32 @@ bool CaptureFrames(const AppConfig& config, ISpecSensorApi& api) {
     }
     std::cout << "[main] Frame buffer allocated: " << buffer_size << " bytes\n";
 
-    std::mutex sample_mutex;
-    std::queue<std::string> sample_queue;
-
-    PipeCore pipe_core;
-    if (!pipe_core.start(config.pipe_name, [&](const AcquisitionJob& job) {
-            std::lock_guard<std::mutex> lock(sample_mutex);
-            sample_queue.push(job.sample_name);
-        })) {
-        std::cerr << "[main] Failed to start PipeCore\n";
-        api.DisposeBuffer(frame_buffer);
-        return false;
-    }
-    std::cout << "[main] Pipe listener started on " << config.pipe_name << "\n";
-
     error = api.Command(L"Acquisition.Start");
     if (error != 0) {
         LogApiFailure(api, "Acquisition.Start", error);
-        pipe_core.stop();
         api.DisposeBuffer(frame_buffer);
         return false;
     }
     std::cout << "[main] Acquisition started\n";
 
-    api.Command(L"Camera.OpenShutter");
+    error = api.Command(L"Camera.OpenShutter");
+    if (error != 0) {
+        LogApiFailure(api, "Camera.OpenShutter", error);
+        api.Command(L"Acquisition.Stop");
+        api.DisposeBuffer(frame_buffer);
+        return false;
+    }
+    std::cout << "[main] Shutter opened\n";
 
-    std::int64_t captured = 0;
+    std::int64_t light_buffers = 0;
+    std::int64_t dark_buffers = 0;
     std::int64_t last_frame_number = 0;
 
-    while (captured < config.min_buffers_required) {
+    const auto light_start = std::chrono::steady_clock::now();
+    const auto light_deadline = light_start + std::chrono::seconds(config.capture_seconds);
+    std::cout << "[main] LIGHT phase started: duration_s=" << config.capture_seconds << "\n";
+
+    while (std::chrono::steady_clock::now() < light_deadline) {
         std::int64_t frame_size = 0;
         std::int64_t frame_number = 0;
 
@@ -185,37 +179,72 @@ bool CaptureFrames(const AppConfig& config, ISpecSensorApi& api) {
             break;
         }
 
-        ++captured;
+        ++light_buffers;
         last_frame_number = frame_number;
 
-        if ((captured % 100) == 0) {
-            std::cout << "[capture] frames=" << captured
+        if ((light_buffers % 100) == 0) {
+            std::cout << "[light] frames=" << light_buffers
                       << " last_frame_number=" << last_frame_number << "\n";
         }
+    }
 
-        for (;;) {
-            std::string sample_name;
-            {
-                std::lock_guard<std::mutex> lock(sample_mutex);
-                if (sample_queue.empty()) {
-                    break;
-                }
-                sample_name = sample_queue.front();
-                sample_queue.pop();
+    if (error == 0) {
+        error = api.Command(L"Camera.CloseShutter");
+        if (error != 0) {
+            LogApiFailure(api, "Camera.CloseShutter", error);
+        } else {
+            std::cout << "[main] Shutter closed\n";
+        }
+    }
+
+    if (error == 0) {
+        error = api.Command(L"Acquisition.RingBuffer.Sync");
+        if (error != 0) {
+            LogApiFailure(api, "Acquisition.RingBuffer.Sync", error);
+        } else {
+            std::cout << "[main] RingBuffer synchronized before DARK phase\n";
+        }
+    }
+
+    if (error == 0) {
+        std::cout << "[main] DARK phase started: target_frames=" << config.dark_frames << "\n";
+        for (int i = 0; i < config.dark_frames; ++i) {
+            std::int64_t frame_size = 0;
+            std::int64_t frame_number = 0;
+
+            error = api.Wait(static_cast<std::uint8_t*>(frame_buffer), &frame_size,
+                             &frame_number, config.wait_timeout_ms);
+            if (error != 0) {
+                LogApiFailure(api, "SI_Wait", error);
+                break;
             }
-            std::cout << "[pipe] sample_name received: " << sample_name << "\n";
+
+            ++dark_buffers;
+            last_frame_number = frame_number;
+
+            if ((dark_buffers % 100) == 0) {
+                std::cout << "[dark] frames=" << dark_buffers
+                          << " last_frame_number=" << last_frame_number << "\n";
+            }
         }
     }
 
     api.Command(L"Acquisition.Stop");
-    pipe_core.stop();
 
     api.DisposeBuffer(frame_buffer);
 
-    const bool pass = (captured >= config.min_buffers_required) && (error == 0);
-    std::cout << "[main] Capture test finished. captured=" << captured
-              << " target=" << config.min_buffers_required
-              << " pass=" << (pass ? "true" : "false") << "\n";
+    const std::int64_t total_buffers = light_buffers + dark_buffers;
+    const bool workflow_ok = (error == 0) && (light_buffers > 0) &&
+                             (dark_buffers == config.dark_frames);
+    std::cout << "[main] Auto workflow finished. light=" << light_buffers
+              << " dark=" << dark_buffers
+              << " total=" << total_buffers
+              << " last_frame=" << last_frame_number
+              << " min_required=" << config.min_buffers_required
+              << " workflow_ok=" << (workflow_ok ? "true" : "false") << "\n";
+
+    const bool pass = workflow_ok;
+    std::cout << "[main] Auto test result: pass=" << (pass ? "true" : "false") << "\n";
 
     return pass;
 }
@@ -237,6 +266,9 @@ bool RunConnectConfigureAndCapture(const AppConfig& config) {
         return false;
     }
 
+    std::cout << "[main] Running automatic capture test: light="
+              << config.capture_seconds
+              << "s dark_frames=" << config.dark_frames << "\n";
     const bool pass = CaptureFrames(config, *api);
     api->Close();
     api->Unload();
