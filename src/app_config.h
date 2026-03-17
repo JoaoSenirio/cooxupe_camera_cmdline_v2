@@ -31,13 +31,13 @@ inline AppConfig MakeDefaultConfig() {
     config.device_index = 10;
     config.exposure_ms = 4.0;
     config.frame_rate_hz = 120.0;
-    config.binning_spatial = 1;
+    config.binning_spatial = 2;
     config.binning_spectral = 1;
     config.calibration_scp_path = L"E:/Calibrations/3210495_20220310_calpack.scp";
     config.output_dir = "C:/SpecSensor/output";
-    config.rgb_wavelength_nm[0] = 650;
-    config.rgb_wavelength_nm[1] = 550;
-    config.rgb_wavelength_nm[2] = 450;
+    config.rgb_wavelength_nm[0] = 610;
+    config.rgb_wavelength_nm[1] = 534;
+    config.rgb_wavelength_nm[2] = 470;
     config.capture_seconds = 40;
     config.dark_frames = 50;
     config.wait_timeout_ms = 1000;
