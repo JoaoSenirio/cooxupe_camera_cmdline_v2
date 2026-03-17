@@ -39,12 +39,23 @@ function Send-CaptureCommand {
     try {
         $client.Connect($ConnectTimeoutMs)
 
-        $writer = New-Object System.IO.StreamWriter($client)
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        $writer = New-Object System.IO.StreamWriter($client, $encoding)
         try {
             $writer.AutoFlush = $true
             $command = "CAPTURE $Sample"
             $writer.WriteLine($command)
-            Write-Host "[client] Sent: $command"
+            $writer.Flush()
+            try {
+                $client.WaitForPipeDrain()
+            }
+            catch {
+                Write-Host "[client] WaitForPipeDrain unavailable: $($_.Exception.Message)"
+            }
+
+            $payload = $command + [Environment]::NewLine
+            $bytes = $encoding.GetByteCount($payload)
+            Write-Host "[client] Sent ($bytes bytes UTF-8): $command"
         }
         finally {
             $writer.Dispose()

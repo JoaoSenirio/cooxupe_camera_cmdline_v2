@@ -59,14 +59,29 @@ int main(int argc, char* argv[]) {
 
     PipeCore pipe_core;
     const bool pipe_started = pipe_core.start(config.pipe_name, [&](const AcquisitionJob& job) {
-        std::lock_guard<std::mutex> lock(work_mutex);
-        if (camera_busy || has_pending_job || capture_core.StopRequested()) {
-            return false;
+        std::string message;
+        bool accepted = false;
+        {
+            std::lock_guard<std::mutex> lock(work_mutex);
+            if (capture_core.StopRequested()) {
+                message = "Pipe command rejected: stop requested. sample=" + job.sample_name;
+            } else if (camera_busy) {
+                message = "Pipe command rejected: camera busy. sample=" + job.sample_name;
+            } else if (has_pending_job) {
+                message = "Pipe command rejected: pending job exists. sample=" + job.sample_name;
+            } else {
+                pending_job = job;
+                has_pending_job = true;
+                accepted = true;
+                message = "Pipe command enqueued. sample=" + job.sample_name;
+            }
         }
-        pending_job = job;
-        has_pending_job = true;
-        work_cv.notify_one();
-        return true;
+
+        capture_core.LogInfo(message);
+        if (accepted) {
+            work_cv.notify_one();
+        }
+        return accepted;
     });
 
     if (!pipe_started) {

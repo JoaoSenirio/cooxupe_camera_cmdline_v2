@@ -27,14 +27,45 @@ std::string Trim(const std::string& value) {
     return value.substr(begin, end - begin);
 }
 
+std::string RemoveNullBytes(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '\0') {
+            out.push_back(text[i]);
+        }
+    }
+    return out;
+}
+
+std::string StripUtf8Bom(const std::string& text) {
+    if (text.size() >= 3 &&
+        static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB &&
+        static_cast<unsigned char>(text[2]) == 0xBF) {
+        return text.substr(3);
+    }
+    return text;
+}
+
+void PipeInfo(const std::string& message) {
+    std::cout << "[pipe] " << message << std::endl;
+}
+
+void PipeError(const std::string& message) {
+    std::cerr << "[pipe] " << message << std::endl;
+}
+
 bool ParseCommand(const std::string& line, AcquisitionJob* job) {
     constexpr const char* kPrefix = "CAPTURE ";
     constexpr std::size_t kPrefixLen = 8;
-    if (line.size() <= kPrefixLen || line.compare(0, kPrefixLen, kPrefix) != 0) {
+
+    const std::string sanitized = StripUtf8Bom(RemoveNullBytes(line));
+    if (sanitized.size() <= kPrefixLen || sanitized.compare(0, kPrefixLen, kPrefix) != 0) {
         return false;
     }
 
-    const std::string sample_name = Trim(line.substr(kPrefixLen));
+    const std::string sample_name = Trim(sanitized.substr(kPrefixLen));
     if (sample_name.empty()) {
         return false;
     }
@@ -93,8 +124,8 @@ void PipeCore::stop() {
 }
 
 bool PipeCore::process_text(const std::string& text_chunk) {
-    std::cout << "[pipe] chunk received (" << text_chunk.size() << " bytes): \""
-              << text_chunk << "\"\n";
+    PipeInfo("chunk received (" + std::to_string(text_chunk.size()) + " bytes): \"" +
+             text_chunk + "\"");
     pending_line_.append(text_chunk);
 
     const std::size_t pos = pending_line_.find('\n');
@@ -109,33 +140,34 @@ bool PipeCore::process_text(const std::string& text_chunk) {
         line.pop_back();
     }
 
-    std::cout << "[pipe] line received: \"" << line << "\"\n";
+    PipeInfo("line received: \"" + line + "\"");
 
     AcquisitionJob job;
     if (!ParseCommand(line, &job)) {
-        std::cerr << "[pipe] invalid command. expected: CAPTURE <sample_name>\n";
+        PipeError("invalid command. expected: CAPTURE <sample_name>");
         return false;
     }
 
     if (!callback_(job)) {
-        std::cout << "[pipe] command rejected (camera busy). sample=" << job.sample_name << "\n";
+        PipeInfo("command rejected (camera busy). sample=" + job.sample_name);
         return false;
     }
 
-    std::cout << "[pipe] command accepted. sample=" << job.sample_name << "\n";
+    PipeInfo("command accepted. sample=" + job.sample_name);
     return false;
 }
 
 void PipeCore::worker_loop() {
 #ifdef _WIN32
     while (started_.load()) {
+        PipeInfo("waiting for client on " + pipe_name_);
         HANDLE pipe = CreateNamedPipeA(
             pipe_name_.c_str(), PIPE_ACCESS_INBOUND,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, nullptr);
 
         if (pipe == INVALID_HANDLE_VALUE) {
-            std::cerr << "[pipe] CreateNamedPipe failed\n";
+            PipeError("CreateNamedPipe failed error=" + std::to_string(GetLastError()));
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             continue;
         }
@@ -144,40 +176,43 @@ void PipeCore::worker_loop() {
                                    ? TRUE
                                    : (GetLastError() == ERROR_PIPE_CONNECTED);
         if (!connected) {
+            PipeError("ConnectNamedPipe failed error=" + std::to_string(GetLastError()));
             CloseHandle(pipe);
             continue;
         }
 
-        std::cout << "[pipe] connection received on " << pipe_name_ << "\n";
+        PipeInfo("connection received on " + pipe_name_);
         pending_line_.clear();
+
+        if (!started_.load()) {
+            PipeInfo("shutdown wake connection received");
+            FlushFileBuffers(pipe);
+            DisconnectNamedPipe(pipe);
+            CloseHandle(pipe);
+            continue;
+        }
 
         char buffer[1024];
         while (started_.load()) {
-            DWORD available = 0;
-            if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
-                const DWORD error = GetLastError();
-                if (error == ERROR_BROKEN_PIPE) {
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                continue;
-            }
-
-            if (available == 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                continue;
-            }
-
-            const DWORD bytes_to_read =
-                available < sizeof(buffer) ? available : static_cast<DWORD>(sizeof(buffer));
-
             DWORD bytes_read = 0;
-            if (!ReadFile(pipe, buffer, bytes_to_read, &bytes_read, nullptr)) {
+            if (!ReadFile(pipe, buffer, static_cast<DWORD>(sizeof(buffer)), &bytes_read, nullptr)) {
                 const DWORD error = GetLastError();
+                if (error == ERROR_MORE_DATA) {
+                    if (bytes_read > 0) {
+                        if (!process_text(std::string(buffer, buffer + bytes_read))) {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 if (error == ERROR_BROKEN_PIPE) {
+                    if (!pending_line_.empty()) {
+                        process_text("\n");
+                    }
+                    PipeInfo("client disconnected");
                     break;
                 }
-                std::cerr << "[pipe] ReadFile failed\n";
+                PipeError("ReadFile failed error=" + std::to_string(error));
                 break;
             }
 
@@ -185,6 +220,8 @@ void PipeCore::worker_loop() {
                 if (!process_text(std::string(buffer, buffer + bytes_read))) {
                     break;
                 }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
         }
 
