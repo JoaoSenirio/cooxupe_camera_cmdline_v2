@@ -39,7 +39,7 @@ inline AppConfig MakeDefaultConfig() {
     config.wait_timeout_ms = 1000;
     config.min_buffers_required = 5000;
     config.pipe_name = "\\\\.\\pipe\\specsensor_sample_pipe";
-    config.log_file_path = "C:SpecimOutput/specsensor_cli.log";
+    config.log_file_path = "C:/SpecimOutput/specsensor_cli.log";
     return config;
 }
 

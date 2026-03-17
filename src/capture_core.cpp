@@ -2,10 +2,15 @@
 
 #include <chrono>
 #include <ctime>
-#include <filesystem>
 #include <iomanip>
+#include <fstream>
 #include <iostream>
 #include <sstream>
+#include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -38,6 +43,111 @@ std::string MakeDayStamp() {
     oss << std::put_time(&tm_local, "%Y%m%d");
     return oss.str();
 }
+
+std::string NormalizePathSeparators(const std::string& path) {
+    std::string normalized = path;
+    for (std::size_t i = 0; i < normalized.size(); ++i) {
+        if (normalized[i] == '/') {
+            normalized[i] = '\\';
+        }
+    }
+    return normalized;
+}
+
+void SplitPath(const std::string& full_path, std::string* dir, std::string* file_name) {
+    const std::size_t pos = full_path.find_last_of("\\/");
+    if (pos == std::string::npos) {
+        *dir = "";
+        *file_name = full_path;
+        return;
+    }
+
+    *dir = full_path.substr(0, pos);
+    *file_name = full_path.substr(pos + 1);
+}
+
+void SplitStemExtension(const std::string& file_name, std::string* stem, std::string* ext) {
+    const std::size_t dot_pos = file_name.find_last_of('.');
+    if (dot_pos == std::string::npos || dot_pos == 0) {
+        *stem = file_name;
+        *ext = "";
+        return;
+    }
+
+    *stem = file_name.substr(0, dot_pos);
+    *ext = file_name.substr(dot_pos);
+}
+
+bool FileExists(const std::string& path) {
+    std::ifstream file(path.c_str(), std::ios::in);
+    return file.is_open();
+}
+
+#ifdef _WIN32
+bool DirectoryExists(const std::string& path) {
+    const DWORD attrs = GetFileAttributesA(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+    return (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+bool CreateDirectoriesRecursive(const std::string& path) {
+    if (path.empty()) {
+        return true;
+    }
+    if (DirectoryExists(path)) {
+        return true;
+    }
+
+    const std::string normalized = NormalizePathSeparators(path);
+    std::string current;
+    current.reserve(normalized.size());
+
+    for (std::size_t i = 0; i < normalized.size(); ++i) {
+        current.push_back(normalized[i]);
+
+        const bool is_sep = (normalized[i] == '\\');
+        const bool is_last = (i + 1 == normalized.size());
+        if (!is_sep && !is_last) {
+            continue;
+        }
+        if (current.empty()) {
+            continue;
+        }
+
+        if (current.size() == 2 && current[1] == ':') {
+            continue;
+        }
+        if (current.size() == 3 && current[1] == ':' && current[2] == '\\') {
+            continue;
+        }
+
+        if (!DirectoryExists(current)) {
+            if (!CreateDirectoryA(current.c_str(), nullptr)) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_ALREADY_EXISTS) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (!DirectoryExists(normalized)) {
+        if (!CreateDirectoryA(normalized.c_str(), nullptr)) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_ALREADY_EXISTS) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+#else
+bool CreateDirectoriesRecursive(const std::string&) {
+    return true;
+}
+#endif
 
 }  // namespace
 
@@ -320,51 +430,49 @@ void CaptureCore::LogError(const std::string& message) {
 }
 
 bool CaptureCore::OpenLogFile() {
-    namespace fs = std::filesystem;
-
     std::lock_guard<std::mutex> lock(log_mutex_);
     if (log_file_.is_open()) {
         return true;
     }
 
-    const fs::path configured_path(config_.log_file_path);
-    fs::path parent_path = configured_path.parent_path();
-    std::string stem = configured_path.stem().string();
-    if (stem.empty()) {
-        stem = configured_path.filename().string();
-    }
+    const std::string configured_path = NormalizePathSeparators(config_.log_file_path);
+    std::string parent_path;
+    std::string file_name;
+    SplitPath(configured_path, &parent_path, &file_name);
+
+    std::string stem;
+    std::string ext;
+    SplitStemExtension(file_name, &stem, &ext);
     if (stem.empty()) {
         stem = "specsensor_cli";
     }
-
-    std::string ext = configured_path.extension().string();
     if (ext.empty()) {
         ext = ".log";
     }
 
-    const fs::path dated_name = stem + "_" + MakeDayStamp() + ext;
-    const fs::path final_log_path = parent_path.empty() ? dated_name : (parent_path / dated_name);
+    const std::string dated_name = stem + "_" + MakeDayStamp() + ext;
+    const std::string final_log_path = parent_path.empty()
+                                           ? dated_name
+                                           : (parent_path + "\\" + dated_name);
 
-    std::error_code ec;
     if (!parent_path.empty()) {
-        fs::create_directories(parent_path, ec);
-        if (ec && !fs::exists(parent_path, ec)) {
+        if (!CreateDirectoriesRecursive(parent_path)) {
             return false;
         }
     }
 
-    const bool file_exists = fs::exists(final_log_path, ec) && !ec;
+    const bool file_exists = FileExists(final_log_path);
     if (!file_exists) {
-        std::ofstream creator(final_log_path.string().c_str(), std::ios::out);
+        std::ofstream creator(final_log_path.c_str(), std::ios::out);
         if (!creator.is_open()) {
             return false;
         }
         creator.close();
     }
 
-    log_file_.open(final_log_path.string().c_str(), std::ios::out | std::ios::app);
+    log_file_.open(final_log_path.c_str(), std::ios::out | std::ios::app);
     if (log_file_.is_open()) {
-        std::cout << "[capture] Logging to file: " << final_log_path.string() << "\n";
+        std::cout << "[capture] Logging to file: " << final_log_path << "\n";
     }
     return log_file_.is_open();
 }
