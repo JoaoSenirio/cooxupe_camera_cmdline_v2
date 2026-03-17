@@ -26,39 +26,31 @@ int BinningValueToEnumIndex(int value) {
     }
 }
 
+void LogApiFailure(ISpecSensorApi& api, const char* step, int code) {
+    std::wcerr << L"[main] " << step
+               << L" failed with code=" << code
+               << L" msg=\"" << api.GetErrorString(code) << L"\"\n";
+}
+
 void PrintUsage() {
     std::cout << "Usage:\n"
               << "  specsensor_cli.exe              # Connect + configure + pipe + capture test\n"
               << "  specsensor_cli.exe --run        # Same behavior as default\n";
 }
 
-bool RunConnectConfigureAndCapture(const AppConfig& config) {
-    std::string validation_error;
-    if (!ValidateConfig(config, &validation_error)) {
-        std::cerr << "[main] Invalid configuration: " << validation_error << "\n";
-        return false;
-    }
-
-    auto api = CreateSpecSensorApi();
-
-    auto fail = [&](const char* step, int code) {
-        std::wcerr << L"[main] " << step
-                   << L" failed with code=" << code
-                   << L" msg=\"" << api->GetErrorString(code) << L"\"\n";
-    };
-
-    int error = api->Load(config.license_path);
+bool ConnectCamera(const AppConfig& config, ISpecSensorApi& api) {
+    int error = api.Load(config.license_path);
     if (error != 0) {
-        fail("SI_Load", error);
+        LogApiFailure(api, "SI_Load", error);
         return false;
     }
     std::cout << "[main] SI_Load ok\n";
 
     std::int64_t device_count = 0;
-    error = api->GetDeviceCount(&device_count);
+    error = api.GetDeviceCount(&device_count);
     if (error != 0) {
-        fail("SI_GetInt(SI_SYSTEM, DeviceCount)", error);
-        api->Unload();
+        LogApiFailure(api, "SI_GetInt(SI_SYSTEM, DeviceCount)", error);
+        api.Unload();
         return false;
     }
 
@@ -66,50 +58,50 @@ bool RunConnectConfigureAndCapture(const AppConfig& config) {
     if (config.device_index < 0 || config.device_index >= device_count) {
         std::cerr << "[main] Invalid device_index=" << config.device_index
                   << " (device_count=" << device_count << ")\n";
-        api->Unload();
+        api.Unload();
         return false;
     }
 
-    error = api->Open(config.device_index);
+    error = api.Open(config.device_index);
     if (error != 0) {
-        fail("SI_Open", error);
-        api->Unload();
+        LogApiFailure(api, "SI_Open", error);
+        api.Unload();
         return false;
     }
     std::cout << "[main] SI_Open ok (device_index=" << config.device_index << ")\n";
 
-    error = api->SetString(L"Camera.CalibrationPack", config.calibration_scp_path);
+    error = api.SetString(L"Camera.CalibrationPack", config.calibration_scp_path);
     if (error != 0) {
-        fail("SI_SetString(Camera.CalibrationPack)", error);
-        api->Close();
-        api->Unload();
+        LogApiFailure(api, "SI_SetString(Camera.CalibrationPack)", error);
+        api.Close();
+        api.Unload();
         return false;
     }
     std::wcout << L"[main] Calibration .scp loaded: " << config.calibration_scp_path << L"\n";
 
-    error = api->Command(L"Initialize");
+    error = api.Command(L"Initialize");
     if (error != 0) {
-        fail("Initialize", error);
-        api->Close();
-        api->Unload();
+        LogApiFailure(api, "Initialize", error);
+        api.Close();
+        api.Unload();
         return false;
     }
     std::cout << "[main] Initialize ok\n";
 
-    error = api->SetFloat(L"Camera.ExposureTime", config.exposure_ms);
+    return true;
+}
+
+bool ConfigureCameraParameters(const AppConfig& config, ISpecSensorApi& api) {
+    int error = api.SetFloat(L"Camera.ExposureTime", config.exposure_ms);
     if (error != 0) {
-        fail("SI_SetFloat(Camera.ExposureTime)", error);
-        api->Close();
-        api->Unload();
+        LogApiFailure(api, "SI_SetFloat(Camera.ExposureTime)", error);
         return false;
     }
     std::cout << "[main] ExposureTime=" << config.exposure_ms << " ms\n";
 
-    error = api->SetFloat(L"Camera.FrameRate", config.frame_rate_hz);
+    error = api.SetFloat(L"Camera.FrameRate", config.frame_rate_hz);
     if (error != 0) {
-        fail("SI_SetFloat(Camera.FrameRate)", error);
-        api->Close();
-        api->Unload();
+        LogApiFailure(api, "SI_SetFloat(Camera.FrameRate)", error);
         return false;
     }
     std::cout << "[main] FrameRate=" << config.frame_rate_hz << " Hz\n";
@@ -118,44 +110,38 @@ bool RunConnectConfigureAndCapture(const AppConfig& config) {
     const int spectral_idx = BinningValueToEnumIndex(config.binning_spectral);
     if (spatial_idx < 0 || spectral_idx < 0) {
         std::cerr << "[main] Invalid binning values in config\n";
-        api->Close();
-        api->Unload();
         return false;
     }
 
-    error = api->SetEnumIndex(L"Camera.Binning.Spatial", spatial_idx);
+    error = api.SetEnumIndex(L"Camera.Binning.Spatial", spatial_idx);
     if (error != 0) {
-        fail("SI_SetEnumIndex(Camera.Binning.Spatial)", error);
-        api->Close();
-        api->Unload();
+        LogApiFailure(api, "SI_SetEnumIndex(Camera.Binning.Spatial)", error);
         return false;
     }
 
-    error = api->SetEnumIndex(L"Camera.Binning.Spectral", spectral_idx);
+    error = api.SetEnumIndex(L"Camera.Binning.Spectral", spectral_idx);
     if (error != 0) {
-        fail("SI_SetEnumIndex(Camera.Binning.Spectral)", error);
-        api->Close();
-        api->Unload();
+        LogApiFailure(api, "SI_SetEnumIndex(Camera.Binning.Spectral)", error);
         return false;
     }
     std::cout << "[main] Binning spatial=" << config.binning_spatial
               << " spectral=" << config.binning_spectral << "\n";
 
+    return true;
+}
+
+bool CaptureFrames(const AppConfig& config, ISpecSensorApi& api) {
     std::int64_t buffer_size = 0;
-    error = api->GetInt(L"Camera.Image.SizeBytes", &buffer_size);
+    int error = api.GetInt(L"Camera.Image.SizeBytes", &buffer_size);
     if (error != 0) {
-        fail("SI_GetInt(Camera.Image.SizeBytes)", error);
-        api->Close();
-        api->Unload();
+        LogApiFailure(api, "SI_GetInt(Camera.Image.SizeBytes)", error);
         return false;
     }
 
     void* frame_buffer = nullptr;
-    error = api->CreateBuffer(buffer_size, &frame_buffer);
+    error = api.CreateBuffer(buffer_size, &frame_buffer);
     if (error != 0) {
-        fail("SI_CreateBuffer", error);
-        api->Close();
-        api->Unload();
+        LogApiFailure(api, "SI_CreateBuffer", error);
         return false;
     }
     std::cout << "[main] Frame buffer allocated: " << buffer_size << " bytes\n";
@@ -169,25 +155,21 @@ bool RunConnectConfigureAndCapture(const AppConfig& config) {
             sample_queue.push(job.sample_name);
         })) {
         std::cerr << "[main] Failed to start PipeCore\n";
-        api->DisposeBuffer(frame_buffer);
-        api->Close();
-        api->Unload();
+        api.DisposeBuffer(frame_buffer);
         return false;
     }
     std::cout << "[main] Pipe listener started on " << config.pipe_name << "\n";
 
-    error = api->Command(L"Acquisition.Start");
+    error = api.Command(L"Acquisition.Start");
     if (error != 0) {
-        fail("Acquisition.Start", error);
+        LogApiFailure(api, "Acquisition.Start", error);
         pipe_core.stop();
-        api->DisposeBuffer(frame_buffer);
-        api->Close();
-        api->Unload();
+        api.DisposeBuffer(frame_buffer);
         return false;
     }
     std::cout << "[main] Acquisition started\n";
 
-    api->Command(L"Camera.OpenShutter");
+    api.Command(L"Camera.OpenShutter");
 
     std::int64_t captured = 0;
     std::int64_t last_frame_number = 0;
@@ -196,10 +178,10 @@ bool RunConnectConfigureAndCapture(const AppConfig& config) {
         std::int64_t frame_size = 0;
         std::int64_t frame_number = 0;
 
-        error = api->Wait(static_cast<std::uint8_t*>(frame_buffer), &frame_size,
-                          &frame_number, config.wait_timeout_ms);
+        error = api.Wait(static_cast<std::uint8_t*>(frame_buffer), &frame_size,
+                         &frame_number, config.wait_timeout_ms);
         if (error != 0) {
-            fail("SI_Wait", error);
+            LogApiFailure(api, "SI_Wait", error);
             break;
         }
 
@@ -225,18 +207,39 @@ bool RunConnectConfigureAndCapture(const AppConfig& config) {
         }
     }
 
-    api->Command(L"Acquisition.Stop");
+    api.Command(L"Acquisition.Stop");
     pipe_core.stop();
 
-    api->DisposeBuffer(frame_buffer);
-    api->Close();
-    api->Unload();
+    api.DisposeBuffer(frame_buffer);
 
     const bool pass = (captured >= config.min_buffers_required) && (error == 0);
     std::cout << "[main] Capture test finished. captured=" << captured
               << " target=" << config.min_buffers_required
               << " pass=" << (pass ? "true" : "false") << "\n";
 
+    return pass;
+}
+
+bool RunConnectConfigureAndCapture(const AppConfig& config) {
+    std::string validation_error;
+    if (!ValidateConfig(config, &validation_error)) {
+        std::cerr << "[main] Invalid configuration: " << validation_error << "\n";
+        return false;
+    }
+
+    auto api = CreateSpecSensorApi();
+    if (!ConnectCamera(config, *api)) {
+        return false;
+    }
+    if (!ConfigureCameraParameters(config, *api)) {
+        api->Close();
+        api->Unload();
+        return false;
+    }
+
+    const bool pass = CaptureFrames(config, *api);
+    api->Close();
+    api->Unload();
     return pass;
 }
 
