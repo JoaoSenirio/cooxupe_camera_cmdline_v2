@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -21,6 +22,20 @@ std::string MakeTimestamp() {
 #endif
     std::ostringstream oss;
     oss << std::put_time(&tm_local, "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
+
+std::string MakeDayStamp() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_local{};
+#ifdef _WIN32
+    localtime_s(&tm_local, &now_time);
+#else
+    localtime_r(&now_time, &tm_local);
+#endif
+    std::ostringstream oss;
+    oss << std::put_time(&tm_local, "%Y%m%d");
     return oss.str();
 }
 
@@ -305,11 +320,52 @@ void CaptureCore::LogError(const std::string& message) {
 }
 
 bool CaptureCore::OpenLogFile() {
+    namespace fs = std::filesystem;
+
     std::lock_guard<std::mutex> lock(log_mutex_);
     if (log_file_.is_open()) {
         return true;
     }
-    log_file_.open(config_.log_file_path.c_str(), std::ios::out | std::ios::app);
+
+    const fs::path configured_path(config_.log_file_path);
+    fs::path parent_path = configured_path.parent_path();
+    std::string stem = configured_path.stem().string();
+    if (stem.empty()) {
+        stem = configured_path.filename().string();
+    }
+    if (stem.empty()) {
+        stem = "specsensor_cli";
+    }
+
+    std::string ext = configured_path.extension().string();
+    if (ext.empty()) {
+        ext = ".log";
+    }
+
+    const fs::path dated_name = stem + "_" + MakeDayStamp() + ext;
+    const fs::path final_log_path = parent_path.empty() ? dated_name : (parent_path / dated_name);
+
+    std::error_code ec;
+    if (!parent_path.empty()) {
+        fs::create_directories(parent_path, ec);
+        if (ec && !fs::exists(parent_path, ec)) {
+            return false;
+        }
+    }
+
+    const bool file_exists = fs::exists(final_log_path, ec) && !ec;
+    if (!file_exists) {
+        std::ofstream creator(final_log_path.string().c_str(), std::ios::out);
+        if (!creator.is_open()) {
+            return false;
+        }
+        creator.close();
+    }
+
+    log_file_.open(final_log_path.string().c_str(), std::ios::out | std::ios::app);
+    if (log_file_.is_open()) {
+        std::cout << "[capture] Logging to file: " << final_log_path.string() << "\n";
+    }
     return log_file_.is_open();
 }
 
