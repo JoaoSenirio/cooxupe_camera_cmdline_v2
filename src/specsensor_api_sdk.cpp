@@ -169,6 +169,46 @@ public:
         return error;
     }
 
+    int GetFloat(const std::wstring& feature, double* value) override {
+        double sdk_value = 0.0;
+        const int error = SI_GetFloat(handle_, feature.c_str(), &sdk_value);
+        if (error == 0 && value != nullptr) {
+            *value = sdk_value;
+        }
+        return error;
+    }
+
+    int GetEnumIndex(const std::wstring& feature, int* value) override {
+        int sdk_value = 0;
+        const int error = SI_GetEnumIndex(handle_, feature.c_str(), &sdk_value);
+        if (error == 0 && value != nullptr) {
+            *value = sdk_value;
+        }
+        return error;
+    }
+
+    int GetEnumCount(const std::wstring& feature, int* count) override {
+        int sdk_count = 0;
+        const int error = SI_GetEnumCount(handle_, feature.c_str(), &sdk_count);
+        if (error == 0 && count != nullptr) {
+            *count = sdk_count;
+        }
+        return error;
+    }
+
+    int GetEnumStringByIndex(const std::wstring& feature, int index, std::wstring* value) override {
+        std::vector<SI_WC> buffer(256, 0);
+        const int error = SI_GetEnumStringByIndex(handle_, feature.c_str(), index, buffer.data(),
+                                                  static_cast<int>(buffer.size()));
+        if (error == 0 && value != nullptr) {
+            value->clear();
+            for (std::size_t i = 0; i < buffer.size() && buffer[i] != 0; ++i) {
+                value->push_back(static_cast<wchar_t>(buffer[i]));
+            }
+        }
+        return error;
+    }
+
     int CreateBuffer(std::int64_t size_bytes, void** buffer) override {
         return SI_CreateBuffer(handle_, static_cast<SI_64>(size_bytes), buffer);
     }
@@ -220,6 +260,10 @@ public:
     int SetString(const std::wstring&, const std::wstring&) override { return -1; }
     int SetEnumIndex(const std::wstring&, int) override { return -1; }
     int GetInt(const std::wstring&, std::int64_t*) override { return -1; }
+    int GetFloat(const std::wstring&, double*) override { return -1; }
+    int GetEnumIndex(const std::wstring&, int*) override { return -1; }
+    int GetEnumCount(const std::wstring&, int*) override { return -1; }
+    int GetEnumStringByIndex(const std::wstring&, int, std::wstring*) override { return -1; }
     int CreateBuffer(std::int64_t, void**) override { return -1; }
     int DisposeBuffer(void*) override { return 0; }
     int Wait(std::uint8_t*, std::int64_t*, std::int64_t*, std::int64_t) override {

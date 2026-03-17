@@ -1,5 +1,6 @@
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <csignal>
 #include <iostream>
 #include <mutex>
@@ -8,6 +9,7 @@
 #include "app_config.h"
 #include "capture_core.h"
 #include "pipe_core.h"
+#include "save_core.h"
 #include "specsensor_api.h"
 
 namespace {
@@ -51,6 +53,18 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    SaveCore save_core(static_cast<std::size_t>(config.save_queue_capacity),
+                       config.save_queue_push_timeout_ms);
+    if (!save_core.start()) {
+        capture_core.LogError("Failed to start SaveCore");
+        capture_core.Shutdown();
+        return 1;
+    }
+
+    capture_core.set_save_sink([&](const SaveEvent& event) {
+        return save_core.enqueue_event(event);
+    });
+
     std::mutex work_mutex;
     std::condition_variable work_cv;
     bool has_pending_job = false;
@@ -86,6 +100,7 @@ int main(int argc, char* argv[]) {
 
     if (!pipe_started) {
         capture_core.LogError("Failed to start pipe server on " + config.pipe_name);
+        save_core.stop();
         capture_core.Shutdown();
         return 1;
     }
@@ -129,6 +144,8 @@ int main(int argc, char* argv[]) {
 
     pipe_core.stop();
     capture_core.LogInfo("Pipe server stopped");
+    save_core.stop();
+    capture_core.LogInfo("SaveCore stopped");
     capture_core.Shutdown();
     return 0;
 }

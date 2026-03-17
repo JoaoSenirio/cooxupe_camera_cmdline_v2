@@ -17,6 +17,10 @@ struct AppConfig {
     int dark_frames;
     int wait_timeout_ms;
     int min_buffers_required;
+    int save_queue_capacity;
+    int save_block_frames;
+    int save_queue_push_timeout_ms;
+    std::string camera_name;
     std::string pipe_name;
     std::string log_file_path;
 };
@@ -38,6 +42,10 @@ inline AppConfig MakeDefaultConfig() {
     config.dark_frames = 50;
     config.wait_timeout_ms = 1000;
     config.min_buffers_required = 5000;
+    config.save_queue_capacity = 200;
+    config.save_block_frames = 64;
+    config.save_queue_push_timeout_ms = 2000;
+    config.camera_name = "FX10";
     config.pipe_name = "\\\\.\\pipe\\specsensor_sample_pipe";
     config.log_file_path = "C:/SpecimOutput/specsensor_cli.log";
     return config;

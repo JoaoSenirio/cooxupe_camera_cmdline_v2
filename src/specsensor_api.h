@@ -22,6 +22,10 @@ public:
     virtual int SetString(const std::wstring& feature, const std::wstring& value) = 0;
     virtual int SetEnumIndex(const std::wstring& feature, int value) = 0;
     virtual int GetInt(const std::wstring& feature, std::int64_t* value) = 0;
+    virtual int GetFloat(const std::wstring& feature, double* value) = 0;
+    virtual int GetEnumIndex(const std::wstring& feature, int* value) = 0;
+    virtual int GetEnumCount(const std::wstring& feature, int* count) = 0;
+    virtual int GetEnumStringByIndex(const std::wstring& feature, int index, std::wstring* value) = 0;
 
     virtual int CreateBuffer(std::int64_t size_bytes, void** buffer) = 0;
     virtual int DisposeBuffer(void* buffer) = 0;

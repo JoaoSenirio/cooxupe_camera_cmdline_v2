@@ -41,6 +41,14 @@ bool ValidateConfig(const AppConfig& config, std::string* error) {
         oss << "wait_timeout_ms must be > 0";
     } else if (config.min_buffers_required <= 0) {
         oss << "min_buffers_required must be > 0";
+    } else if (config.save_queue_capacity <= 0) {
+        oss << "save_queue_capacity must be > 0";
+    } else if (config.save_block_frames <= 0) {
+        oss << "save_block_frames must be > 0";
+    } else if (config.save_queue_push_timeout_ms <= 0) {
+        oss << "save_queue_push_timeout_ms must be > 0";
+    } else if (config.camera_name.empty()) {
+        oss << "camera_name must not be empty";
     } else if (config.pipe_name.empty()) {
         oss << "pipe_name must not be empty";
     } else if (config.log_file_path.empty()) {
