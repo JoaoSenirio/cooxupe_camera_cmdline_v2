@@ -1,9 +1,12 @@
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <iostream>
+#include <mutex>
 #include <string>
 
 #include "app_config.h"
+#include "pipe_core.h"
 #include "specsensor_api.h"
 
 namespace {
@@ -57,7 +60,7 @@ bool DisposeFrameBuffer(ISpecSensorApi& api, void* frame_buffer) {
 
 void PrintUsage() {
     std::cout << "Usage:\n"
-              << "  specsensor_cli.exe              # Connect + configure + 10x light/dark capture test\n"
+              << "  specsensor_cli.exe              # Connect + configure + pipe server + on-demand capture\n"
               << "  specsensor_cli.exe --run        # Same behavior as default\n";
 }
 
@@ -258,7 +261,7 @@ bool CaptureFrames(const AppConfig& config, ISpecSensorApi& api) {
     const std::int64_t total_buffers = light_buffers + dark_buffers;
     const bool workflow_ok = (error == 0) && (light_buffers > 0) &&
                              (dark_buffers == config.dark_frames);
-    std::cout << "[main] Auto workflow finished. light=" << light_buffers
+    std::cout << "[main] Capture workflow finished. light=" << light_buffers
               << " dark=" << dark_buffers
               << " total=" << total_buffers
               << " last_frame=" << last_frame_number
@@ -266,32 +269,9 @@ bool CaptureFrames(const AppConfig& config, ISpecSensorApi& api) {
               << " workflow_ok=" << (workflow_ok ? "true" : "false") << "\n";
 
     const bool pass = workflow_ok;
-    std::cout << "[main] Auto test result: pass=" << (pass ? "true" : "false") << "\n";
+    std::cout << "[main] Capture result: pass=" << (pass ? "true" : "false") << "\n";
 
     return pass;
-}
-
-bool RunCaptureWorkflowTestLoop(const AppConfig& config, ISpecSensorApi& api, int iterations) {
-    const int test_iterations = (iterations < 10) ? 10 : iterations;
-    int passed_iterations = 0;
-
-    std::cout << "[main] Running automatic capture workflow loop: iterations="
-              << test_iterations
-              << " light=" << config.capture_seconds
-              << "s dark_frames=" << config.dark_frames << "\n";
-
-    for (int i = 0; i < test_iterations; ++i) {
-        std::cout << "[main] Iteration " << (i + 1) << "/" << test_iterations << "\n";
-        if (!CaptureFrames(config, api)) {
-            std::cout << "[main] Iteration " << (i + 1) << " failed\n";
-            return false;
-        }
-        ++passed_iterations;
-    }
-
-    std::cout << "[main] Capture workflow loop finished. passed="
-              << passed_iterations << "/" << test_iterations << "\n";
-    return passed_iterations == test_iterations;
 }
 
 }  // namespace
@@ -322,14 +302,57 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    bool pass = false;
     if (!ConfigureCameraParameters(config, *api)) {
-        pass = false;
-    } else {
-        pass = RunCaptureWorkflowTestLoop(config, *api, 10);
+        api->Close();
+        api->Unload();
+        return 1;
     }
 
-    api->Close();
-    api->Unload();
-    return pass ? 0 : 1;
+    std::mutex work_mutex;
+    std::condition_variable work_cv;
+    bool has_pending_job = false;
+    AcquisitionJob pending_job;
+    bool camera_busy = false;
+
+    PipeCore pipe_core;
+    const bool pipe_started = pipe_core.start(config.pipe_name, [&](const AcquisitionJob& job) {
+        std::lock_guard<std::mutex> lock(work_mutex);
+        if (camera_busy || has_pending_job) {
+            return false;
+        }
+        pending_job = job;
+        has_pending_job = true;
+        work_cv.notify_one();
+        return true;
+    });
+
+    if (!pipe_started) {
+        std::cerr << "[main] Failed to start pipe server on " << config.pipe_name << "\n";
+        api->Close();
+        api->Unload();
+        return 1;
+    }
+    std::cout << "[main] Pipe server started on " << config.pipe_name << "\n";
+    std::cout << "[main] Expected command format: CAPTURE <sample_name>\\n\n";
+
+    for (;;) {
+        AcquisitionJob job;
+        {
+            std::unique_lock<std::mutex> lock(work_mutex);
+            work_cv.wait(lock, [&] { return has_pending_job; });
+            job = pending_job;
+            has_pending_job = false;
+            camera_busy = true;
+        }
+
+        std::cout << "[main] Starting capture request sample=" << job.sample_name << "\n";
+        const bool pass = CaptureFrames(config, *api);
+        std::cout << "[main] Finished capture request sample=" << job.sample_name
+                  << " pass=" << (pass ? "true" : "false") << "\n";
+
+        {
+            std::lock_guard<std::mutex> lock(work_mutex);
+            camera_busy = false;
+        }
+    }
 }

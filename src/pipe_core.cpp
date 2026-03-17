@@ -1,12 +1,49 @@
 #include "pipe_core.h"
 
 #include <chrono>
+#include <cctype>
 #include <iostream>
 #include <string>
 
 #ifdef _WIN32
 #include <windows.h>
 #endif
+
+namespace {
+
+std::string Trim(const std::string& value) {
+    std::size_t begin = 0;
+    while (begin < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+        ++begin;
+    }
+
+    std::size_t end = value.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+
+    return value.substr(begin, end - begin);
+}
+
+bool ParseCommand(const std::string& line, AcquisitionJob* job) {
+    constexpr const char* kPrefix = "CAPTURE ";
+    constexpr std::size_t kPrefixLen = 8;
+    if (line.size() <= kPrefixLen || line.compare(0, kPrefixLen, kPrefix) != 0) {
+        return false;
+    }
+
+    const std::string sample_name = Trim(line.substr(kPrefixLen));
+    if (sample_name.empty()) {
+        return false;
+    }
+
+    job->sample_name = sample_name;
+    return true;
+}
+
+}  // namespace
 
 PipeCore::PipeCore() = default;
 
@@ -51,26 +88,34 @@ void PipeCore::stop() {
     pending_line_.clear();
 }
 
-void PipeCore::process_text(const std::string& text_chunk) {
+bool PipeCore::process_text(const std::string& text_chunk) {
     pending_line_.append(text_chunk);
 
-    std::size_t pos = pending_line_.find('\n');
-    while (pos != std::string::npos) {
-        std::string line = pending_line_.substr(0, pos);
-        pending_line_.erase(0, pos + 1);
-
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-
-        if (!line.empty()) {
-            AcquisitionJob job;
-            job.sample_name = line;
-            callback_(job);
-        }
-
-        pos = pending_line_.find('\n');
+    const std::size_t pos = pending_line_.find('\n');
+    if (pos == std::string::npos) {
+        return true;
     }
+
+    std::string line = pending_line_.substr(0, pos);
+    pending_line_.erase(0, pos + 1);
+
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
+
+    AcquisitionJob job;
+    if (!ParseCommand(line, &job)) {
+        std::cerr << "[pipe] invalid command. expected: CAPTURE <sample_name>\n";
+        return false;
+    }
+
+    if (!callback_(job)) {
+        std::cout << "[pipe] command rejected (camera busy). sample=" << job.sample_name << "\n";
+        return false;
+    }
+
+    std::cout << "[pipe] command accepted. sample=" << job.sample_name << "\n";
+    return false;
 }
 
 void PipeCore::worker_loop() {
@@ -96,6 +141,7 @@ void PipeCore::worker_loop() {
         }
 
         std::cout << "[pipe] client connected\n";
+        pending_line_.clear();
 
         char buffer[1024];
         while (started_.load()) {
@@ -128,7 +174,9 @@ void PipeCore::worker_loop() {
             }
 
             if (bytes_read > 0) {
-                process_text(std::string(buffer, buffer + bytes_read));
+                if (!process_text(std::string(buffer, buffer + bytes_read))) {
+                    break;
+                }
             }
         }
 

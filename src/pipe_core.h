@@ -10,7 +10,7 @@
 
 class PipeCore {
 public:
-    using JobCallback = std::function<void(const AcquisitionJob&)>;
+    using JobCallback = std::function<bool(const AcquisitionJob&)>;
 
     PipeCore();
     ~PipeCore();
@@ -19,8 +19,7 @@ public:
     void stop();
 
 private:
-    void worker_loop();
-    void process_text(const std::string& text_chunk);
+    bool process_text(const std::string& text_chunk);
 
     std::string pipe_name_;
     JobCallback callback_;
