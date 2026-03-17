@@ -19,6 +19,7 @@ public:
     void stop();
 
 private:
+    void worker_loop();
     bool process_text(const std::string& text_chunk);
 
     std::string pipe_name_;
