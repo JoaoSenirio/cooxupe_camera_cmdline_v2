@@ -32,7 +32,7 @@ HANDLE ConnectPipeWithRetry(const std::string& pipe_name) {
 }
 
 bool SendSample(HANDLE pipe, const std::string& sample_name) {
-    const std::string payload = sample_name + "\n";
+    const std::string payload = "CAPTURE " + sample_name + "\n";
     DWORD bytes_written = 0;
     if (!WriteFile(pipe, payload.data(), static_cast<DWORD>(payload.size()),
                    &bytes_written, nullptr)) {
@@ -53,6 +53,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Windows Pipe Client\n";
     std::cout << "Pipe: " << pipe_name << "\n";
+    std::cout << "Command format: CAPTURE <sample_name>\n";
     std::cout << "Type sample names and press ENTER. Type 'q' to exit.\n\n";
 
     HANDLE pipe = ConnectPipeWithRetry(pipe_name);
@@ -82,7 +83,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        std::cout << "[client] Sent: " << sample_name << "\n";
+        std::cout << "[client] Sent: CAPTURE " << sample_name << "\n";
     }
 
     CloseHandle(pipe);
