@@ -89,6 +89,8 @@ void PipeCore::stop() {
 }
 
 bool PipeCore::process_text(const std::string& text_chunk) {
+    std::cout << "[pipe] chunk received (" << text_chunk.size() << " bytes): \""
+              << text_chunk << "\"\n";
     pending_line_.append(text_chunk);
 
     const std::size_t pos = pending_line_.find('\n');
@@ -102,6 +104,8 @@ bool PipeCore::process_text(const std::string& text_chunk) {
     if (!line.empty() && line.back() == '\r') {
         line.pop_back();
     }
+
+    std::cout << "[pipe] line received: \"" << line << "\"\n";
 
     AcquisitionJob job;
     if (!ParseCommand(line, &job)) {
@@ -140,7 +144,7 @@ void PipeCore::worker_loop() {
             continue;
         }
 
-        std::cout << "[pipe] client connected\n";
+        std::cout << "[pipe] connection received on " << pipe_name_ << "\n";
         pending_line_.clear();
 
         char buffer[1024];
