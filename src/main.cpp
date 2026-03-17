@@ -70,6 +70,25 @@ int main(int argc, char* argv[]) {
     bool has_pending_job = false;
     AcquisitionJob pending_job;
     bool camera_busy = false;
+    bool ctrl_c_logged = false;
+
+    auto request_stop_if_needed = [&]() {
+        if (g_ctrl_c_requested == 0 || capture_core.StopRequested()) {
+            return;
+        }
+
+        if (!ctrl_c_logged) {
+            capture_core.LogInfo("CTRL+C received. stop requested.");
+            ctrl_c_logged = true;
+        }
+
+        capture_core.RequestStop();
+        {
+            std::lock_guard<std::mutex> lock(work_mutex);
+            has_pending_job = false;
+        }
+        work_cv.notify_all();
+    };
 
     PipeCore pipe_core;
     const bool pipe_started = pipe_core.start(config.pipe_name, [&](const AcquisitionJob& job) {
@@ -77,7 +96,7 @@ int main(int argc, char* argv[]) {
         bool accepted = false;
         {
             std::lock_guard<std::mutex> lock(work_mutex);
-            if (capture_core.StopRequested()) {
+            if (g_ctrl_c_requested != 0 || capture_core.StopRequested()) {
                 message = "Pipe command rejected: stop requested. sample=" + job.sample_name;
             } else if (camera_busy) {
                 message = "Pipe command rejected: camera busy. sample=" + job.sample_name;
@@ -109,25 +128,53 @@ int main(int argc, char* argv[]) {
     capture_core.LogInfo("Expected command format: CAPTURE <sample_name>\\n");
     capture_core.LogInfo("Press CTRL+C to shutdown");
 
-    while (!capture_core.StopRequested()) {
-        if (g_ctrl_c_requested != 0) {
-            capture_core.RequestStop();
+    while (true) {
+        request_stop_if_needed();
+        if (capture_core.StopRequested()) {
             break;
         }
 
         AcquisitionJob job;
+        bool has_job = false;
         {
             std::unique_lock<std::mutex> lock(work_mutex);
             const bool has_work = work_cv.wait_for(
                 lock, std::chrono::milliseconds(200),
-                [&] { return has_pending_job || capture_core.StopRequested(); });
-            if (!has_work || capture_core.StopRequested()) {
+                [&] { return has_pending_job || capture_core.StopRequested() || g_ctrl_c_requested != 0; });
+
+            if (g_ctrl_c_requested != 0 && !capture_core.StopRequested()) {
+                if (!ctrl_c_logged) {
+                    capture_core.LogInfo("CTRL+C received. stop requested.");
+                    ctrl_c_logged = true;
+                }
+                capture_core.RequestStop();
+                has_pending_job = false;
+            }
+
+            if (!has_work || capture_core.StopRequested() || g_ctrl_c_requested != 0) {
+                if (capture_core.StopRequested()) {
+                    has_pending_job = false;
+                }
                 continue;
             }
 
             job = pending_job;
             has_pending_job = false;
             camera_busy = true;
+            has_job = true;
+        }
+
+        if (!has_job) {
+            continue;
+        }
+
+        request_stop_if_needed();
+        if (capture_core.StopRequested() || g_ctrl_c_requested != 0) {
+            capture_core.LogInfo("Discarding queued command due to stop request. sample=" +
+                                 job.sample_name);
+            std::lock_guard<std::mutex> lock(work_mutex);
+            camera_busy = false;
+            continue;
         }
 
         capture_core.LogInfo("Starting capture request sample=" + job.sample_name);

@@ -227,27 +227,54 @@ void PipeCore::worker_loop() {
 
         char buffer[1024];
         while (started_.load()) {
-            DWORD bytes_read = 0;
-            if (!ReadFile(pipe, buffer, static_cast<DWORD>(sizeof(buffer)), &bytes_read, nullptr)) {
+            DWORD bytes_available = 0;
+            if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &bytes_available, nullptr)) {
                 const DWORD error = GetLastError();
                 if (error == ERROR_BROKEN_PIPE) {
                     if (!pending_line_.empty()) {
                         process_text("\n", connection_id);
                     }
                     PipeInfo(ConnTag(connection_id) + "client disconnected");
-                    break;
+                } else {
+                    PipeError(ConnTag(connection_id) +
+                              "PeekNamedPipe failed error=" + std::to_string(error));
                 }
-                PipeError(ConnTag(connection_id) +
-                          "ReadFile failed error=" + std::to_string(error));
                 break;
             }
 
-            if (bytes_read > 0) {
-                if (!process_text(std::string(buffer, buffer + bytes_read), connection_id)) {
-                    break;
-                }
-            } else {
+            if (bytes_available == 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            DWORD to_read = bytes_available;
+            const DWORD max_chunk = static_cast<DWORD>(sizeof(buffer));
+            if (to_read > max_chunk) {
+                to_read = max_chunk;
+            }
+
+            DWORD bytes_read = 0;
+            if (!ReadFile(pipe, buffer, to_read, &bytes_read, nullptr)) {
+                const DWORD error = GetLastError();
+                if (error == ERROR_BROKEN_PIPE) {
+                    if (!pending_line_.empty()) {
+                        process_text("\n", connection_id);
+                    }
+                    PipeInfo(ConnTag(connection_id) + "client disconnected");
+                } else {
+                    PipeError(ConnTag(connection_id) +
+                              "ReadFile failed error=" + std::to_string(error));
+                }
+                break;
+            }
+
+            if (bytes_read == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            if (!process_text(std::string(buffer, buffer + bytes_read), connection_id)) {
+                break;
             }
         }
 
