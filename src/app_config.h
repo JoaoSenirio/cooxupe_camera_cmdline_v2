@@ -33,7 +33,7 @@ inline AppConfig MakeDefaultConfig() {
     config.frame_rate_hz = 150.0;
     config.binning_spatial = 2;
     config.binning_spectral = 1;
-    config.calibration_scp_path = L"E:/Calibrations/3210495_20220310_calpack.scp";
+    config.calibration_scp_path = L"E:/Calibrations/4210325_20211207_calpack.scp";
     config.output_dir = "C:/SpecSensor/output";
     config.rgb_wavelength_nm[0] = 1039;
     config.rgb_wavelength_nm[1] = 1370;
