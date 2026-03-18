@@ -6,6 +6,13 @@
 #include <mutex>
 #include <string>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "app_config.h"
 #include "capture_core.h"
 #include "pipe_core.h"
@@ -28,9 +35,36 @@ void PrintUsage() {
               << "  specsensor_cli.exe --run        # Same behavior as default\n";
 }
 
+#ifdef _WIN32
+void DisableConsoleQuickEdit() {
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    if (input == INVALID_HANDLE_VALUE || input == nullptr) {
+        return;
+    }
+
+    DWORD mode = 0;
+    if (!GetConsoleMode(input, &mode)) {
+        return;
+    }
+
+    DWORD updated_mode = mode;
+    updated_mode |= ENABLE_EXTENDED_FLAGS;
+#ifdef ENABLE_QUICK_EDIT_MODE
+    updated_mode &= ~static_cast<DWORD>(ENABLE_QUICK_EDIT_MODE);
+#endif
+    if (updated_mode != mode) {
+        SetConsoleMode(input, updated_mode);
+    }
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    DisableConsoleQuickEdit();
+#endif
+
     AppConfig config = MakeDefaultConfig();
 
     if (argc > 1) {
