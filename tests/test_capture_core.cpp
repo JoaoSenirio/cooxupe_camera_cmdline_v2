@@ -58,14 +58,20 @@ int TestWorkflowWithFakeApi() {
     TEST_ASSERT(api.open_index == config.device_index, "device index must match config");
     TEST_ASSERT(api.exposure_time == config.exposure_ms, "exposure must be configured");
     TEST_ASSERT(api.frame_rate == config.frame_rate_hz, "frame rate must be configured");
-    TEST_ASSERT(api.spatial_binning_index == 0, "spatial binning index must be set");
-    TEST_ASSERT(api.spectral_binning_index == 0, "spectral binning index must be set");
+    TEST_ASSERT(api.spatial_binning_index == BinningValueToEnumIndex(config.binning_spatial),
+                "spatial binning index must be set");
+    TEST_ASSERT(api.spectral_binning_index == BinningValueToEnumIndex(config.binning_spectral),
+                "spectral binning index must be set");
 
     TEST_ASSERT(api.HasCommand(L"Acquisition.Start"), "must start acquisition");
     TEST_ASSERT(api.HasCommand(L"Acquisition.RingBuffer.Sync"), "must sync ring buffer");
     TEST_ASSERT(api.HasCommand(L"Camera.OpenShutter"), "must open shutter");
     TEST_ASSERT(api.HasCommand(L"Camera.CloseShutter"), "must close shutter");
     TEST_ASSERT(api.HasCommand(L"Acquisition.Stop"), "must stop acquisition");
+    TEST_ASSERT(api.CountCommand(L"Acquisition.Start") == 2,
+                "must restart acquisition before DARK");
+    TEST_ASSERT(api.CountCommand(L"Acquisition.Stop") == 2,
+                "must stop after LIGHT and after DARK");
 
     TEST_ASSERT(captured_summary.dark_buffers == config.dark_frames,
                 "dark buffer count must match configured dark_frames");

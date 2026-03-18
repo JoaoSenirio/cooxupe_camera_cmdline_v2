@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -27,6 +28,7 @@ constexpr int kAppStoppedByUser = -30000;
 constexpr int kAppSaveQueueError = -30001;
 constexpr int kAppInvalidFrameSize = -30002;
 constexpr int kAppSnapshotError = -30003;
+constexpr auto kMinRestartDelay = std::chrono::milliseconds(250);
 
 std::string MakeTimestamp() {
     const auto now = std::chrono::system_clock::now();
@@ -419,9 +421,13 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         return true;
     };
 
+    bool acquisition_active = false;
+
     error = RunCameraCommand(L"Acquisition.Start", "Acquisition.Start");
     if (error != 0) {
         set_error(error, Narrow(api_->GetErrorString(error)));
+    } else {
+        acquisition_active = true;
     }
 
     if (error == 0) {
@@ -520,9 +526,24 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
     }
 
     if (error == 0) {
-        error = RunCameraCommand(L"Acquisition.RingBuffer.Sync", "Acquisition.RingBuffer.Sync (before DARK)");
+        LogInfo("Restarting acquisition before DARK to discard queued LIGHT frames");
+        error = RunCameraCommand(L"Acquisition.Stop", "Acquisition.Stop (after LIGHT)");
         if (error != 0) {
             set_error(error, Narrow(api_->GetErrorString(error)));
+        } else {
+            acquisition_active = false;
+        }
+    }
+
+    if (error == 0) {
+        LogInfo("Waiting " + std::to_string(kMinRestartDelay.count()) +
+                " ms before restarting acquisition for DARK");
+        std::this_thread::sleep_for(kMinRestartDelay);
+        error = RunCameraCommand(L"Acquisition.Start", "Acquisition.Start (before DARK)");
+        if (error != 0) {
+            set_error(error, Narrow(api_->GetErrorString(error)));
+        } else {
+            acquisition_active = true;
         }
     }
 
@@ -598,9 +619,13 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         }
     }
 
-    const int stop_error = RunCameraCommand(L"Acquisition.Stop", "Acquisition.Stop");
-    if (local_summary.sdk_error == 0 && stop_error != 0) {
-        set_error(stop_error, Narrow(api_->GetErrorString(stop_error)));
+    if (acquisition_active) {
+        const int stop_error = RunCameraCommand(L"Acquisition.Stop", "Acquisition.Stop");
+        if (local_summary.sdk_error == 0 && stop_error != 0) {
+            set_error(stop_error, Narrow(api_->GetErrorString(stop_error)));
+        } else if (stop_error == 0) {
+            acquisition_active = false;
+        }
     }
 
     const int dispose_error = DisposeFrameBuffer(frame_buffer);

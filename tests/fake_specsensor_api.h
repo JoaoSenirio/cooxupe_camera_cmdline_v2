@@ -92,12 +92,85 @@ public:
     }
 
     int GetInt(const std::wstring& feature, std::int64_t* value) override {
+        if (feature == L"Camera.Image.Width") {
+            if (value != nullptr) {
+                *value = image_width;
+            }
+            return 0;
+        }
+        if (feature == L"Camera.Image.Height") {
+            if (value != nullptr) {
+                *value = image_height;
+            }
+            return 0;
+        }
         if (feature == L"Camera.Image.SizeBytes") {
             if (value != nullptr) {
                 *value = frame_size_bytes;
             }
             return 0;
         }
+        if (feature == L"Camera.SensorID") {
+            if (value != nullptr) {
+                *value = sensor_id;
+            }
+            return 0;
+        }
+        if (feature == L"AcquisitionWindow.Left" || feature == L"AcquisitionWindow.Top") {
+            if (value != nullptr) {
+                *value = 0;
+            }
+            return 0;
+        }
+        return -2;
+    }
+
+    int GetFloat(const std::wstring& feature, double* value) override {
+        if (feature == L"Camera.ExposureTime") {
+            if (value != nullptr) {
+                *value = exposure_time;
+            }
+            return 0;
+        }
+        if (feature == L"Camera.FrameRate") {
+            if (value != nullptr) {
+                *value = frame_rate;
+            }
+            return 0;
+        }
+        if (feature == L"Camera.Temperature") {
+            if (value != nullptr) {
+                *value = temperature_c;
+            }
+            return 0;
+        }
+        return -2;
+    }
+
+    int GetEnumIndex(const std::wstring& feature, int* value) override {
+        if (feature == L"Camera.Binning.Spatial") {
+            if (value != nullptr) {
+                *value = spatial_binning_index;
+            }
+            return 0;
+        }
+        if (feature == L"Camera.Binning.Spectral") {
+            if (value != nullptr) {
+                *value = spectral_binning_index;
+            }
+            return 0;
+        }
+        return -2;
+    }
+
+    int GetEnumCount(const std::wstring&, int* count) override {
+        if (count != nullptr) {
+            *count = 0;
+        }
+        return 0;
+    }
+
+    int GetEnumStringByIndex(const std::wstring&, int, std::wstring*) override {
         return -2;
     }
 
@@ -143,6 +216,10 @@ public:
         return std::find(commands.begin(), commands.end(), name) != commands.end();
     }
 
+    int CountCommand(const std::wstring& name) const {
+        return static_cast<int>(std::count(commands.begin(), commands.end(), name));
+    }
+
     bool loaded = false;
     bool opened = false;
     bool initialized = false;
@@ -154,7 +231,11 @@ public:
     std::wstring calibration_pack;
     int spatial_binning_index = -1;
     int spectral_binning_index = -1;
+    std::int64_t image_width = 64;
+    std::int64_t image_height = 32;
     std::int64_t frame_size_bytes = 4096;
+    std::int64_t sensor_id = 12345;
+    double temperature_c = 27.5;
     int wait_delay_us = 0;
     std::wstring load_license_path;
     std::vector<std::wstring> commands;
