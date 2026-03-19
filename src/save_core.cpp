@@ -776,11 +776,11 @@ bool SaveCore::write_rgb_png() {
     }
 
     const int max_width = 1920;
-    const int max_height = 1080;
+
     const int step_x = std::max(1, (width + max_width - 1) / std::max(1, max_width));
-    const int step_y = std::max(1, (lines + max_height - 1) / std::max(1, max_height));
-    const int out_w = (width + step_x - 1) / step_x;
-    const int out_h = (lines + step_y - 1) / step_y;
+    const int step_y = 1;
+    int out_w = (width + step_x - 1) / step_x;
+    const int out_h = lines;
 
     std::uint16_t rmin = std::numeric_limits<std::uint16_t>::max();
     std::uint16_t gmin = std::numeric_limits<std::uint16_t>::max();
