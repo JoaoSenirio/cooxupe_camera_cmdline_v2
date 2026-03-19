@@ -29,10 +29,10 @@ inline AppConfig MakeDefaultConfig() {
     AppConfig config{};
     config.license_path = L"C:/Users/Public/Documents/Specim/SpecSensor.lic";
     config.device_index = 10;
-    config.exposure_ms = 4.0;
-    config.frame_rate_hz = 120.0;
+    config.exposure_ms = 3;
+    config.frame_rate_hz = 300.0;
     config.binning_spatial = 2;
-    config.binning_spectral = 1;
+    config.binning_spectral = 2;
     config.calibration_scp_path = L"E:/Calibrations/3210495_20220310_calpack.scp";
     config.output_dir = "C:/SpecSensor/output";
     config.rgb_wavelength_nm[0] = 610;
