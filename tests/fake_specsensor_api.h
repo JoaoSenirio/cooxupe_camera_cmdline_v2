@@ -45,6 +45,7 @@ public:
 
     int Command(const std::wstring& feature) override {
         commands.push_back(feature);
+        operations.push_back(L"Command:" + feature);
         if (feature == L"Acquisition.Start") {
             acquiring = true;
             return 0;
@@ -67,6 +68,7 @@ public:
     }
 
     int SetFloat(const std::wstring& feature, double value) override {
+        operations.push_back(L"SetFloat:" + feature);
         if (feature == L"Camera.ExposureTime") {
             exposure_time = value;
         } else if (feature == L"Camera.FrameRate") {
@@ -76,6 +78,7 @@ public:
     }
 
     int SetString(const std::wstring& feature, const std::wstring& value) override {
+        operations.push_back(L"SetString:" + feature);
         if (feature == L"Camera.CalibrationPack") {
             calibration_pack = value;
         }
@@ -83,6 +86,14 @@ public:
     }
 
     int SetEnumIndex(const std::wstring& feature, int value) override {
+        operations.push_back(L"SetEnumIndex:" + feature);
+        if (feature == L"Camera.Trigger.Mode") {
+            if (value < 0 || value >= static_cast<int>(trigger_modes.size())) {
+                return -2;
+            }
+            trigger_mode_index = value;
+            return 0;
+        }
         if (feature == L"Camera.Binning.Spatial") {
             spatial_binning_index = value;
         } else if (feature == L"Camera.Binning.Spectral") {
@@ -128,13 +139,13 @@ public:
     int GetFloat(const std::wstring& feature, double* value) override {
         if (feature == L"Camera.ExposureTime") {
             if (value != nullptr) {
-                *value = exposure_time;
+                *value = override_exposure_readback ? exposure_readback_value : exposure_time;
             }
             return 0;
         }
         if (feature == L"Camera.FrameRate") {
             if (value != nullptr) {
-                *value = frame_rate;
+                *value = override_frame_rate_readback ? frame_rate_readback_value : frame_rate;
             }
             return 0;
         }
@@ -144,10 +155,26 @@ public:
             }
             return 0;
         }
+        if (feature == L"Acquisition.CalculatedFrameRate") {
+            if (!calculated_frame_rate_supported) {
+                return -2;
+            }
+            if (value != nullptr) {
+                *value = calculated_frame_rate_value > 0.0 ? calculated_frame_rate_value : frame_rate;
+            }
+            return 0;
+        }
         return -2;
     }
 
     int GetEnumIndex(const std::wstring& feature, int* value) override {
+        if (feature == L"Camera.Trigger.Mode") {
+            if (value != nullptr) {
+                *value = override_trigger_mode_readback ? trigger_mode_readback_index
+                                                       : trigger_mode_index;
+            }
+            return 0;
+        }
         if (feature == L"Camera.Binning.Spatial") {
             if (value != nullptr) {
                 *value = spatial_binning_index;
@@ -163,14 +190,29 @@ public:
         return -2;
     }
 
-    int GetEnumCount(const std::wstring&, int* count) override {
+    int GetEnumCount(const std::wstring& feature, int* count) override {
+        if (feature == L"Camera.Trigger.Mode") {
+            if (count != nullptr) {
+                *count = static_cast<int>(trigger_modes.size());
+            }
+            return 0;
+        }
         if (count != nullptr) {
             *count = 0;
         }
         return 0;
     }
 
-    int GetEnumStringByIndex(const std::wstring&, int, std::wstring*) override {
+    int GetEnumStringByIndex(const std::wstring& feature, int index, std::wstring* value) override {
+        if (feature == L"Camera.Trigger.Mode") {
+            if (index < 0 || index >= static_cast<int>(trigger_modes.size())) {
+                return -2;
+            }
+            if (value != nullptr) {
+                *value = trigger_modes[static_cast<std::size_t>(index)];
+            }
+            return 0;
+        }
         return -2;
     }
 
@@ -220,6 +262,14 @@ public:
         return static_cast<int>(std::count(commands.begin(), commands.end(), name));
     }
 
+    int IndexOfOperation(const std::wstring& name) const {
+        const auto it = std::find(operations.begin(), operations.end(), name);
+        if (it == operations.end()) {
+            return -1;
+        }
+        return static_cast<int>(std::distance(operations.begin(), it));
+    }
+
     bool loaded = false;
     bool opened = false;
     bool initialized = false;
@@ -237,8 +287,19 @@ public:
     std::int64_t sensor_id = 12345;
     double temperature_c = 27.5;
     int wait_delay_us = 0;
+    bool override_exposure_readback = false;
+    double exposure_readback_value = 0.0;
+    bool override_frame_rate_readback = false;
+    double frame_rate_readback_value = 0.0;
+    bool calculated_frame_rate_supported = true;
+    double calculated_frame_rate_value = 0.0;
+    bool override_trigger_mode_readback = false;
+    int trigger_mode_readback_index = 0;
     std::wstring load_license_path;
     std::vector<std::wstring> commands;
+    std::vector<std::wstring> operations;
+    std::vector<std::wstring> trigger_modes{L"Internal", L"External"};
+    int trigger_mode_index = 0;
 
 private:
     std::atomic<std::int64_t> current_frame{0};

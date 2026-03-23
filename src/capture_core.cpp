@@ -1,5 +1,6 @@
 #include "capture_core.h"
 
+#include <cmath>
 #include <chrono>
 #include <ctime>
 #include <fstream>
@@ -29,6 +30,7 @@ constexpr int kAppSaveQueueError = -30001;
 constexpr int kAppInvalidFrameSize = -30002;
 constexpr int kAppSnapshotError = -30003;
 constexpr auto kMinRestartDelay = std::chrono::milliseconds(250);
+constexpr double kFloatReadbackTolerance = 1e-6;
 
 std::string MakeTimestamp() {
     const auto now = std::chrono::system_clock::now();
@@ -244,6 +246,31 @@ bool ParseDoubleFromWide(const std::wstring& text, double* out) {
     }
 }
 
+bool WideEqualsAscii(const std::wstring& lhs, const char* rhs_ascii) {
+    if (rhs_ascii == nullptr) {
+        return false;
+    }
+
+    std::size_t i = 0;
+    for (; i < lhs.size() && rhs_ascii[i] != 0; ++i) {
+        if (lhs[i] != static_cast<wchar_t>(rhs_ascii[i])) {
+            return false;
+        }
+    }
+    return i == lhs.size() && rhs_ascii[i] == 0;
+}
+
+double ComputeFramePeriodMs(double frame_rate_hz) {
+    if (frame_rate_hz <= 0.0) {
+        return 0.0;
+    }
+    return 1000.0 / frame_rate_hz;
+}
+
+bool NearlyEqual(double lhs, double rhs) {
+    return std::fabs(lhs - rhs) <= kFloatReadbackTolerance;
+}
+
 }  // namespace
 
 int BinningValueToEnumIndex(int binning_value) {
@@ -389,6 +416,57 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
     std::int64_t chunk_first_frame = 0;
     std::int64_t chunk_last_frame = 0;
 
+    auto make_phase_fps_logger = [&](const char* phase_name) {
+        const auto phase_started_at = std::chrono::steady_clock::now();
+        auto last_report_at = phase_started_at;
+        std::int64_t last_report_frames = 0;
+
+        return [&, phase_name, phase_started_at, last_report_at, last_report_frames]
+               (std::int64_t total_frames, bool force) mutable {
+            if (total_frames <= 0) {
+                return;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed_since_report = now - last_report_at;
+            if (!force && elapsed_since_report < std::chrono::seconds(1)) {
+                return;
+            }
+
+            const auto interval_frames = total_frames - last_report_frames;
+            const double interval_seconds =
+                std::chrono::duration<double>(elapsed_since_report).count();
+            if (interval_frames <= 0 || interval_seconds <= 0.0) {
+                return;
+            }
+
+            const double local_fps =
+                static_cast<double>(interval_frames) / interval_seconds;
+            const double average_seconds =
+                std::chrono::duration<double>(now - phase_started_at).count();
+            const double average_fps =
+                average_seconds > 0.0
+                    ? (static_cast<double>(total_frames) / average_seconds)
+                    : 0.0;
+
+            std::ostringstream oss;
+            oss << phase_name
+                << " fps frames=" << total_frames
+                << " local_fps=" << std::fixed << std::setprecision(2) << local_fps
+                << " avg_fps=" << std::fixed << std::setprecision(2) << average_fps;
+
+            double sdk_fps = 0.0;
+            if (api_->GetFloat(L"Acquisition.CalculatedFrameRate", &sdk_fps) == 0 &&
+                sdk_fps > 0.0) {
+                oss << " sdk_fps=" << std::fixed << std::setprecision(2) << sdk_fps;
+            }
+
+            LogInfo(oss.str());
+            last_report_at = now;
+            last_report_frames = total_frames;
+        };
+    };
+
     auto flush_chunk = [&](SaveEventType type) -> bool {
         if (chunk_frame_count <= 0) {
             return true;
@@ -446,6 +524,7 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
 
     std::int64_t prev_light_frame = -1;
     if (error == 0) {
+        auto log_light_fps = make_phase_fps_logger("LIGHT");
         light_start_time_utc = MakeUtcTime();
         LogInfo("LIGHT phase started: duration_s=" + std::to_string(config_.capture_seconds));
         const auto light_start = std::chrono::steady_clock::now();
@@ -505,7 +584,10 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
                 LogInfo("LIGHT frames=" + std::to_string(local_summary.light_buffers) +
                         " last_frame_number=" + std::to_string(local_summary.last_frame_number));
             }
+
+            log_light_fps(local_summary.light_buffers, false);
         }
+        log_light_fps(local_summary.light_buffers, true);
         light_stop_time_utc = MakeUtcTime();
     }
 
@@ -549,6 +631,7 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
 
     std::int64_t prev_dark_frame = -1;
     if (error == 0) {
+        auto log_dark_fps = make_phase_fps_logger("DARK");
         dark_start_time_utc = MakeUtcTime();
         LogInfo("DARK phase started: target_frames=" + std::to_string(config_.dark_frames));
         for (int i = 0; i < config_.dark_frames; ++i) {
@@ -606,7 +689,10 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
                 LogInfo("DARK frames=" + std::to_string(local_summary.dark_buffers) +
                         " last_frame_number=" + std::to_string(local_summary.last_frame_number));
             }
+
+            log_dark_fps(local_summary.dark_buffers, false);
         }
+        log_dark_fps(local_summary.dark_buffers, true);
         dark_stop_time_utc = MakeUtcTime();
     }
 
@@ -834,19 +920,111 @@ bool CaptureCore::ConnectCamera() {
 }
 
 bool CaptureCore::ConfigureCameraParameters() {
-    int error = api_->SetFloat(L"Camera.ExposureTime", config_.exposure_ms);
+    int trigger_mode_count = 0;
+    int error = api_->GetEnumCount(L"Camera.Trigger.Mode", &trigger_mode_count);
+    if (error != 0) {
+        LogApiFailure("SI_GetEnumCount(Camera.Trigger.Mode)", error);
+        return false;
+    }
+
+    int internal_trigger_mode_index = -1;
+    for (int i = 0; i < trigger_mode_count; ++i) {
+        std::wstring trigger_mode;
+        error = api_->GetEnumStringByIndex(L"Camera.Trigger.Mode", i, &trigger_mode);
+        if (error != 0) {
+            LogApiFailure("SI_GetEnumStringByIndex(Camera.Trigger.Mode)", error);
+            return false;
+        }
+        if (WideEqualsAscii(trigger_mode, "Internal")) {
+            internal_trigger_mode_index = i;
+            break;
+        }
+    }
+
+    if (internal_trigger_mode_index < 0) {
+        LogError("Camera.Trigger.Mode does not expose enum value Internal");
+        return false;
+    }
+
+    error = api_->SetEnumIndex(L"Camera.Trigger.Mode", internal_trigger_mode_index);
+    if (error != 0) {
+        LogApiFailure("SI_SetEnumIndex(Camera.Trigger.Mode)", error);
+        return false;
+    }
+
+    int applied_trigger_mode_index = -1;
+    error = api_->GetEnumIndex(L"Camera.Trigger.Mode", &applied_trigger_mode_index);
+    if (error != 0) {
+        LogApiFailure("SI_GetEnumIndex(Camera.Trigger.Mode)", error);
+        return false;
+    }
+    if (applied_trigger_mode_index != internal_trigger_mode_index) {
+        LogError("Camera.Trigger.Mode readback mismatch. requested=Internal applied_index=" +
+                 std::to_string(applied_trigger_mode_index));
+        return false;
+    }
+    LogInfo("Trigger.Mode requested=Internal applied=Internal");
+
+    const double frame_period_ms = ComputeFramePeriodMs(config_.frame_rate_hz);
+    if (frame_period_ms <= 0.0) {
+        LogError("Invalid frame period derived from frame_rate_hz=" +
+                 std::to_string(config_.frame_rate_hz));
+        return false;
+    }
+    if (config_.exposure_ms > frame_period_ms) {
+        std::ostringstream oss;
+        oss << "ExposureTime is incompatible with FrameRate in free-running mode. exposure_ms="
+            << config_.exposure_ms << " frame_rate_hz=" << config_.frame_rate_hz
+            << " frame_period_ms=" << frame_period_ms;
+        LogError(oss.str());
+        return false;
+    }
+
+    error = api_->SetFloat(L"Camera.ExposureTime", config_.exposure_ms);
     if (error != 0) {
         LogApiFailure("SI_SetFloat(Camera.ExposureTime)", error);
         return false;
     }
-    LogInfo("ExposureTime=" + std::to_string(config_.exposure_ms) + " ms");
 
     error = api_->SetFloat(L"Camera.FrameRate", config_.frame_rate_hz);
     if (error != 0) {
         LogApiFailure("SI_SetFloat(Camera.FrameRate)", error);
         return false;
     }
-    LogInfo("FrameRate=" + std::to_string(config_.frame_rate_hz) + " Hz");
+
+    double applied_exposure_ms = 0.0;
+    error = api_->GetFloat(L"Camera.ExposureTime", &applied_exposure_ms);
+    if (error != 0) {
+        LogApiFailure("SI_GetFloat(Camera.ExposureTime)", error);
+        return false;
+    }
+
+    std::ostringstream exposure_log;
+    exposure_log << "ExposureTime requested=" << std::fixed << std::setprecision(6)
+                 << config_.exposure_ms << " ms"
+                 << " applied=" << applied_exposure_ms << " ms"
+                 << " delta=" << (applied_exposure_ms - config_.exposure_ms) << " ms";
+    LogInfo(exposure_log.str());
+    if (!NearlyEqual(applied_exposure_ms, config_.exposure_ms)) {
+        LogInfo("ExposureTime readback differs from requested value; continuing with applied value");
+    }
+
+    double applied_frame_rate_hz = 0.0;
+    error = api_->GetFloat(L"Camera.FrameRate", &applied_frame_rate_hz);
+    if (error != 0) {
+        LogApiFailure("SI_GetFloat(Camera.FrameRate)", error);
+        return false;
+    }
+
+    std::ostringstream frame_rate_log;
+    frame_rate_log << "FrameRate requested=" << std::fixed << std::setprecision(6)
+                   << config_.frame_rate_hz << " Hz"
+                   << " applied=" << applied_frame_rate_hz << " Hz"
+                   << " delta=" << (applied_frame_rate_hz - config_.frame_rate_hz) << " Hz";
+    LogInfo(frame_rate_log.str());
+    if (!NearlyEqual(applied_frame_rate_hz, config_.frame_rate_hz)) {
+        LogInfo("FrameRate readback differs from requested value; continuing with applied value");
+    }
 
     const int spatial_idx = BinningValueToEnumIndex(config_.binning_spatial);
     const int spectral_idx = BinningValueToEnumIndex(config_.binning_spectral);
