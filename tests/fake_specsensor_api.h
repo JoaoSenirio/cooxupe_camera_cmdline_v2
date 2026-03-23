@@ -176,6 +176,12 @@ public:
             }
             return 0;
         }
+        if (feature == L"Camera.Image.ReadoutTime") {
+            if (value != nullptr) {
+                *value = image_readout_time_ms;
+            }
+            return 0;
+        }
         if (feature == L"Camera.Temperature") {
             if (value != nullptr) {
                 *value = temperature_c;
@@ -316,6 +322,7 @@ public:
     std::int64_t image_height = 32;
     std::int64_t frame_size_bytes = 4096;
     std::int64_t sensor_id = 12345;
+    double image_readout_time_ms = 6.137;
     double temperature_c = 27.5;
     int wait_delay_us = 0;
     bool override_exposure_readback = false;
