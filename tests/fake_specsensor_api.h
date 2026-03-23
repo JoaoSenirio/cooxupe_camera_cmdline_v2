@@ -67,11 +67,28 @@ public:
         return 0;
     }
 
+    int SetBool(const std::wstring& feature, bool value) override {
+        operations.push_back(L"SetBool:" + feature);
+        if (feature == L"Camera.ExposureTime.Auto") {
+            if (set_exposure_time_auto_error != 0) {
+                return set_exposure_time_auto_error;
+            }
+            exposure_time_auto = value;
+        }
+        return 0;
+    }
+
     int SetFloat(const std::wstring& feature, double value) override {
         operations.push_back(L"SetFloat:" + feature);
         if (feature == L"Camera.ExposureTime") {
+            if (set_exposure_time_error != 0) {
+                return set_exposure_time_error;
+            }
             exposure_time = value;
         } else if (feature == L"Camera.FrameRate") {
+            if (set_frame_rate_error != 0) {
+                return set_frame_rate_error;
+            }
             frame_rate = value;
         }
         return 0;
@@ -130,6 +147,16 @@ public:
         if (feature == L"AcquisitionWindow.Left" || feature == L"AcquisitionWindow.Top") {
             if (value != nullptr) {
                 *value = 0;
+            }
+            return 0;
+        }
+        return -2;
+    }
+
+    int GetBool(const std::wstring& feature, bool* value) override {
+        if (feature == L"Camera.ExposureTime.Auto") {
+            if (value != nullptr) {
+                *value = exposure_time_auto;
             }
             return 0;
         }
@@ -278,6 +305,10 @@ public:
     int open_index = -1;
     double exposure_time = 0.0;
     double frame_rate = 0.0;
+    bool exposure_time_auto = false;
+    int set_exposure_time_auto_error = 0;
+    int set_exposure_time_error = 0;
+    int set_frame_rate_error = 0;
     std::wstring calibration_pack;
     int spatial_binning_index = -1;
     int spectral_binning_index = -1;

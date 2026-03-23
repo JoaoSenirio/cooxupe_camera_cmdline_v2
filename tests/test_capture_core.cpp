@@ -124,16 +124,22 @@ int TestInitializeConfiguresInternalTriggerBeforeFloats() {
     core.Shutdown();
 
     TEST_ASSERT(api.trigger_mode_index == 0, "trigger mode must be set to Internal");
+    TEST_ASSERT(api.exposure_time_auto == false, "manual exposure mode must be enforced");
 
     const int trigger_idx = api.IndexOfOperation(L"SetEnumIndex:Camera.Trigger.Mode");
+    const int exposure_auto_idx = api.IndexOfOperation(L"SetBool:Camera.ExposureTime.Auto");
     const int exposure_idx = api.IndexOfOperation(L"SetFloat:Camera.ExposureTime");
     const int frame_rate_idx = api.IndexOfOperation(L"SetFloat:Camera.FrameRate");
 
     TEST_ASSERT(trigger_idx >= 0, "trigger mode operation must be recorded");
+    TEST_ASSERT(exposure_auto_idx >= 0, "exposure auto operation must be recorded");
     TEST_ASSERT(exposure_idx >= 0, "exposure operation must be recorded");
     TEST_ASSERT(frame_rate_idx >= 0, "frame rate operation must be recorded");
-    TEST_ASSERT(trigger_idx < exposure_idx, "trigger mode must be configured before exposure");
-    TEST_ASSERT(trigger_idx < frame_rate_idx, "trigger mode must be configured before frame rate");
+    TEST_ASSERT(trigger_idx < exposure_auto_idx,
+                "trigger mode must be configured before exposure auto");
+    TEST_ASSERT(exposure_auto_idx < exposure_idx, "exposure auto must be configured before exposure");
+    TEST_ASSERT(exposure_auto_idx < frame_rate_idx,
+                "exposure auto must be configured before frame rate");
     return 0;
 }
 
@@ -164,7 +170,7 @@ int TestInitializeFailsWhenTriggerReadbackMismatches() {
     return 0;
 }
 
-int TestInitializeRejectsExposureFrameRateIncompatibility() {
+int TestInitializeDefersExposureFrameRateCompatibilityToSdk() {
     AppConfig config = MakeTestConfig("specsensor_cli_test_incompatible_timing");
     config.exposure_ms = 10.0;
     config.frame_rate_hz = 200.0;
@@ -173,8 +179,28 @@ int TestInitializeRejectsExposureFrameRateIncompatibility() {
     FakeSpecSensorApi api;
     CaptureCore core(config, &api);
 
-    TEST_ASSERT(!core.Initialize(), "initialize must fail for incompatible exposure/frame rate");
+    TEST_ASSERT(core.Initialize(),
+                "initialize should not reject exposure/frame rate locally");
     core.Shutdown();
+    return 0;
+}
+
+int TestInitializeLogsRawSdkErrorCodeOnFrameRateFailure() {
+    AppConfig config = MakeTestConfig("specsensor_cli_test_raw_sdk_error");
+    RemoveLogFileIfExists(config.log_file_path);
+
+    FakeSpecSensorApi api;
+    api.set_frame_rate_error = -4321;
+    CaptureCore core(config, &api);
+
+    TEST_ASSERT(!core.Initialize(), "initialize must fail when frame rate set fails");
+    core.Shutdown();
+
+    const std::string log_contents = ReadTextFile(ResolveLogFilePath(config.log_file_path));
+    TEST_ASSERT(StringContains(log_contents, "SI_SetFloat(Camera.FrameRate) failed with raw_code=-4321"),
+                "log must contain raw SDK error code");
+    TEST_ASSERT(StringContains(log_contents, "hex=0xFFFFEF1F"),
+                "log must contain hexadecimal SDK error code");
     return 0;
 }
 
@@ -203,6 +229,7 @@ int TestWorkflowWithReadbackWarningsAndPhaseFpsLogs() {
     TEST_ASSERT(api.opened == false, "device should be closed after stop");
     TEST_ASSERT(api.initialized, "Initialize command must be called");
     TEST_ASSERT(api.open_index == config.device_index, "device index must match config");
+    TEST_ASSERT(api.exposure_time_auto == false, "manual exposure mode must remain disabled");
     TEST_ASSERT(api.exposure_time == config.exposure_ms, "exposure must be configured");
     TEST_ASSERT(api.frame_rate == config.frame_rate_hz, "frame rate must be configured");
     TEST_ASSERT(api.spatial_binning_index == BinningValueToEnumIndex(config.binning_spatial),
@@ -284,7 +311,10 @@ int main() {
     if (TestInitializeFailsWhenTriggerReadbackMismatches() != 0) {
         return 1;
     }
-    if (TestInitializeRejectsExposureFrameRateIncompatibility() != 0) {
+    if (TestInitializeDefersExposureFrameRateCompatibilityToSdk() != 0) {
+        return 1;
+    }
+    if (TestInitializeLogsRawSdkErrorCodeOnFrameRateFailure() != 0) {
         return 1;
     }
     if (TestWorkflowWithReadbackWarningsAndPhaseFpsLogs() != 0) {

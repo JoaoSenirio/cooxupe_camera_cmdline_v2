@@ -151,6 +151,10 @@ public:
         return SI_Command(handle_, feature.c_str());
     }
 
+    int SetBool(const std::wstring& feature, bool value) override {
+        return SI_SetBool(handle_, feature.c_str(), value);
+    }
+
     int SetFloat(const std::wstring& feature, double value) override {
         return SI_SetFloat(handle_, feature.c_str(), value);
     }
@@ -174,6 +178,15 @@ public:
         const int error = SI_GetInt(handle_, feature.c_str(), &sdk_value);
         if (error == 0 && value != nullptr) {
             *value = static_cast<std::int64_t>(sdk_value);
+        }
+        return error;
+    }
+
+    int GetBool(const std::wstring& feature, bool* value) override {
+        bool sdk_value = false;
+        const int error = SI_GetBool(handle_, feature.c_str(), &sdk_value);
+        if (error == 0 && value != nullptr) {
+            *value = sdk_value;
         }
         return error;
     }
