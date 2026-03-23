@@ -264,6 +264,24 @@ bool NearlyEqual(double lhs, double rhs) {
     return std::fabs(lhs - rhs) <= kFloatReadbackTolerance;
 }
 
+void LogReadoutTimeIfAvailable(ISpecSensorApi* api,
+                               const std::function<void(const std::string&)>& log_info) {
+    if (api == nullptr) {
+        return;
+    }
+
+    double readout_time_ms = 0.0;
+    const int error = api->GetFloat(L"Camera.Image.ReadoutTime", &readout_time_ms);
+    if (error != 0) {
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << "Camera.Image.ReadoutTime=" << std::fixed << std::setprecision(6)
+        << readout_time_ms << " ms";
+    log_info(oss.str());
+}
+
 }  // namespace
 
 int BinningValueToEnumIndex(int binning_value) {
@@ -958,6 +976,35 @@ bool CaptureCore::ConfigureCameraParameters() {
     }
     LogInfo("Trigger.Mode requested=Internal applied=Internal");
 
+    const int spatial_idx = BinningValueToEnumIndex(config_.binning_spatial);
+    const int spectral_idx = BinningValueToEnumIndex(config_.binning_spectral);
+    if (spatial_idx < 0 || spectral_idx < 0) {
+        LogError("Invalid binning values in config");
+        return false;
+    }
+
+    LogReadoutTimeIfAvailable(api_, [this](const std::string& message) {
+        LogInfo("Before binning: " + message);
+    });
+
+    error = api_->SetEnumIndex(L"Camera.Binning.Spatial", spatial_idx);
+    if (error != 0) {
+        LogApiFailure("SI_SetEnumIndex(Camera.Binning.Spatial)", error);
+        return false;
+    }
+
+    error = api_->SetEnumIndex(L"Camera.Binning.Spectral", spectral_idx);
+    if (error != 0) {
+        LogApiFailure("SI_SetEnumIndex(Camera.Binning.Spectral)", error);
+        return false;
+    }
+
+    LogInfo("Binning spatial=" + std::to_string(config_.binning_spatial) +
+            " spectral=" + std::to_string(config_.binning_spectral));
+    LogReadoutTimeIfAvailable(api_, [this](const std::string& message) {
+        LogInfo("After binning: " + message);
+    });
+
     error = api_->SetBool(L"Camera.ExposureTime.Auto", false);
     if (error != 0) {
         LogApiFailure("SI_SetBool(Camera.ExposureTime.Auto)", error);
@@ -976,6 +1023,10 @@ bool CaptureCore::ConfigureCameraParameters() {
         LogApiFailure("SI_SetFloat(Camera.FrameRate)", error);
         return false;
     }
+
+    LogReadoutTimeIfAvailable(api_, [this](const std::string& message) {
+        LogInfo("After timing apply: " + message);
+    });
 
     double applied_exposure_ms = 0.0;
     error = api_->GetFloat(L"Camera.ExposureTime", &applied_exposure_ms);
@@ -1010,28 +1061,6 @@ bool CaptureCore::ConfigureCameraParameters() {
     if (!NearlyEqual(applied_frame_rate_hz, config_.frame_rate_hz)) {
         LogInfo("FrameRate readback differs from requested value; continuing with applied value");
     }
-
-    const int spatial_idx = BinningValueToEnumIndex(config_.binning_spatial);
-    const int spectral_idx = BinningValueToEnumIndex(config_.binning_spectral);
-    if (spatial_idx < 0 || spectral_idx < 0) {
-        LogError("Invalid binning values in config");
-        return false;
-    }
-
-    error = api_->SetEnumIndex(L"Camera.Binning.Spatial", spatial_idx);
-    if (error != 0) {
-        LogApiFailure("SI_SetEnumIndex(Camera.Binning.Spatial)", error);
-        return false;
-    }
-
-    error = api_->SetEnumIndex(L"Camera.Binning.Spectral", spectral_idx);
-    if (error != 0) {
-        LogApiFailure("SI_SetEnumIndex(Camera.Binning.Spectral)", error);
-        return false;
-    }
-
-    LogInfo("Binning spatial=" + std::to_string(config_.binning_spatial) +
-            " spectral=" + std::to_string(config_.binning_spectral));
     return true;
 }
 
