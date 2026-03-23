@@ -260,13 +260,6 @@ bool WideEqualsAscii(const std::wstring& lhs, const char* rhs_ascii) {
     return i == lhs.size() && rhs_ascii[i] == 0;
 }
 
-double ComputeFramePeriodMs(double frame_rate_hz) {
-    if (frame_rate_hz <= 0.0) {
-        return 0.0;
-    }
-    return 1000.0 / frame_rate_hz;
-}
-
 bool NearlyEqual(double lhs, double rhs) {
     return std::fabs(lhs - rhs) <= kFloatReadbackTolerance;
 }
@@ -965,20 +958,12 @@ bool CaptureCore::ConfigureCameraParameters() {
     }
     LogInfo("Trigger.Mode requested=Internal applied=Internal");
 
-    const double frame_period_ms = ComputeFramePeriodMs(config_.frame_rate_hz);
-    if (frame_period_ms <= 0.0) {
-        LogError("Invalid frame period derived from frame_rate_hz=" +
-                 std::to_string(config_.frame_rate_hz));
+    error = api_->SetBool(L"Camera.ExposureTime.Auto", false);
+    if (error != 0) {
+        LogApiFailure("SI_SetBool(Camera.ExposureTime.Auto)", error);
         return false;
     }
-    if (config_.exposure_ms > frame_period_ms) {
-        std::ostringstream oss;
-        oss << "ExposureTime is incompatible with FrameRate in free-running mode. exposure_ms="
-            << config_.exposure_ms << " frame_rate_hz=" << config_.frame_rate_hz
-            << " frame_period_ms=" << frame_period_ms;
-        LogError(oss.str());
-        return false;
-    }
+    LogInfo("ExposureTime.Auto requested=false applied=false");
 
     error = api_->SetFloat(L"Camera.ExposureTime", config_.exposure_ms);
     if (error != 0) {
@@ -1221,7 +1206,10 @@ bool CaptureCore::FillSensorSnapshot(SensorSnapshot* snapshot) {
 
 void CaptureCore::LogApiFailure(const char* step, int code) {
     std::ostringstream oss;
-    oss << step << " failed with code=" << code
+    oss << step << " failed with raw_code=" << code
+        << " hex=0x" << std::uppercase << std::hex
+        << static_cast<unsigned int>(static_cast<std::uint32_t>(code))
+        << std::dec
         << " msg=\"" << Narrow(api_->GetErrorString(code)) << "\"";
     LogError(oss.str());
 }
