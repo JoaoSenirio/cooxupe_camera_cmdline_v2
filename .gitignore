@@ -1,5 +1,7 @@
 # Local test artifacts
 tests/build/
+tests/artifacts/
+*specsensor_cli_test_*.log
 
 # Visual Studio
 .vs/
