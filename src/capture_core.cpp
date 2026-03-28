@@ -310,6 +310,10 @@ void CaptureCore::set_save_sink(std::function<bool(const SaveEvent&)> save_sink)
     save_sink_ = save_sink;
 }
 
+void CaptureCore::set_progress_sink(std::function<void(const CaptureProgressEvent&)> progress_sink) {
+    progress_sink_ = progress_sink;
+}
+
 bool CaptureCore::Initialize() {
     if (api_ == nullptr) {
         std::cerr << "[capture] API pointer is null\n";
@@ -381,12 +385,50 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
     const bool has_save_sink = static_cast<bool>(save_sink_);
     const std::uint64_t job_id = has_save_sink ? next_job_id_++ : 0;
     bool begin_sent = false;
+    const double effective_frame_rate_hz =
+        snapshot.frame_rate_hz > 0.0 ? snapshot.frame_rate_hz : config_.frame_rate_hz;
+    const std::int64_t expected_light_frames = std::max<std::int64_t>(
+        1, static_cast<std::int64_t>(std::llround(static_cast<double>(config_.capture_seconds) *
+                                                  std::max(0.0, effective_frame_rate_hz))));
+    const std::int64_t expected_dark_frames = std::max(0, config_.dark_frames);
 
     std::string acquisition_date_utc = MakeUtcDate();
     std::string light_start_time_utc;
     std::string light_stop_time_utc;
     std::string dark_start_time_utc;
     std::string dark_stop_time_utc;
+    const auto capture_started_at = std::chrono::steady_clock::now();
+    auto light_phase_started_at = capture_started_at;
+    auto dark_phase_started_at = capture_started_at;
+    auto last_light_progress_at = capture_started_at - std::chrono::seconds(1);
+    auto last_dark_progress_at = capture_started_at - std::chrono::seconds(1);
+
+    auto emit_progress = [&](CaptureProgressType type,
+                             CapturePhase phase,
+                             const std::chrono::steady_clock::time_point& phase_started_at) {
+        if (!progress_sink_) {
+            return;
+        }
+
+        CaptureProgressEvent event;
+        event.type = type;
+        event.sample_name = job.sample_name;
+        event.phase = phase;
+        event.light_frames_captured = local_summary.light_buffers;
+        event.dark_frames_captured = local_summary.dark_buffers;
+        event.dark_frames_target = config_.dark_frames;
+        event.frame_size_bytes = snapshot.frame_size_bytes;
+        event.capture_elapsed_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - capture_started_at).count();
+        event.phase_elapsed_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - phase_started_at).count();
+        event.capture_target_seconds = static_cast<double>(config_.capture_seconds);
+        event.estimated_frame_rate_hz = effective_frame_rate_hz;
+        event.success = local_summary.pass;
+        event.sdk_error = local_summary.sdk_error;
+        event.message = local_summary.message;
+        progress_sink_(event);
+    };
 
     if (has_save_sink) {
         SaveEvent begin;
@@ -396,6 +438,8 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         begin.begin.camera_name = config_.camera_name;
         begin.begin.output_dir = config_.output_dir;
         begin.begin.timestamp_tag = MakeFolderTimestampTag();
+        begin.begin.expected_light_frames = expected_light_frames;
+        begin.begin.expected_dark_frames = expected_dark_frames;
         begin.begin.rgb_wavelength_nm[0] = config_.rgb_wavelength_nm[0];
         begin.begin.rgb_wavelength_nm[1] = config_.rgb_wavelength_nm[1];
         begin.begin.rgb_wavelength_nm[2] = config_.rgb_wavelength_nm[2];
@@ -512,6 +556,7 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
 
     bool acquisition_active = false;
 
+    emit_progress(CaptureProgressType::CaptureStarted, CapturePhase::Light, capture_started_at);
     error = RunCameraCommand(L"Acquisition.Start", "Acquisition.Start");
     if (error != 0) {
         set_error(error, Narrow(api_->GetErrorString(error)));
@@ -539,6 +584,7 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         light_start_time_utc = MakeUtcTime();
         LogInfo("LIGHT phase started: duration_s=" + std::to_string(config_.capture_seconds));
         const auto light_start = std::chrono::steady_clock::now();
+        light_phase_started_at = light_start;
         const auto light_deadline = light_start + std::chrono::seconds(config_.capture_seconds);
         while (std::chrono::steady_clock::now() < light_deadline) {
             if (stop_requested_.load()) {
@@ -597,8 +643,14 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
             }
 
             log_light_fps(local_summary.light_buffers, false);
+            const auto now = std::chrono::steady_clock::now();
+            if ((now - last_light_progress_at) >= std::chrono::milliseconds(250)) {
+                emit_progress(CaptureProgressType::CaptureProgress, CapturePhase::Light, light_phase_started_at);
+                last_light_progress_at = now;
+            }
         }
         log_light_fps(local_summary.light_buffers, true);
+        emit_progress(CaptureProgressType::CaptureProgress, CapturePhase::Light, light_phase_started_at);
         light_stop_time_utc = MakeUtcTime();
     }
 
@@ -645,6 +697,7 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         auto log_dark_fps = make_phase_fps_logger("DARK");
         dark_start_time_utc = MakeUtcTime();
         LogInfo("DARK phase started: target_frames=" + std::to_string(config_.dark_frames));
+        dark_phase_started_at = std::chrono::steady_clock::now();
         for (int i = 0; i < config_.dark_frames; ++i) {
             if (stop_requested_.load()) {
                 error = kAppStoppedByUser;
@@ -702,8 +755,14 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
             }
 
             log_dark_fps(local_summary.dark_buffers, false);
+            const auto now = std::chrono::steady_clock::now();
+            if ((now - last_dark_progress_at) >= std::chrono::milliseconds(250)) {
+                emit_progress(CaptureProgressType::CaptureProgress, CapturePhase::Dark, dark_phase_started_at);
+                last_dark_progress_at = now;
+            }
         }
         log_dark_fps(local_summary.dark_buffers, true);
+        emit_progress(CaptureProgressType::CaptureProgress, CapturePhase::Dark, dark_phase_started_at);
         dark_stop_time_utc = MakeUtcTime();
     }
 
@@ -734,6 +793,10 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
     local_summary.pass = (local_summary.sdk_error == 0) &&
                          (local_summary.light_buffers > 0) &&
                          (local_summary.dark_buffers == config_.dark_frames);
+
+    emit_progress(CaptureProgressType::CaptureFinished,
+                  error == 0 ? CapturePhase::Dark : CapturePhase::Light,
+                  error == 0 ? dark_phase_started_at : light_phase_started_at);
 
     if (has_save_sink && begin_sent) {
         SaveEvent end;

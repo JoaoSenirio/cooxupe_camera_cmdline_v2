@@ -23,6 +23,7 @@ public:
     bool CaptureSample(const AcquisitionJob& job, AcquisitionSummary* summary);
     void Shutdown();
     void set_save_sink(std::function<bool(const SaveEvent&)> save_sink);
+    void set_progress_sink(std::function<void(const CaptureProgressEvent&)> progress_sink);
 
     void RequestStop();
     bool StopRequested() const;
@@ -52,6 +53,7 @@ private:
     std::atomic<bool> stop_requested_{false};
     std::uint64_t next_job_id_ = 1;
     std::function<bool(const SaveEvent&)> save_sink_;
+    std::function<void(const CaptureProgressEvent&)> progress_sink_;
 
     mutable std::mutex log_mutex_;
     std::ofstream log_file_;

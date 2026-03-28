@@ -16,6 +16,8 @@ export TEST_ARTIFACTS_DIR="$ARTIFACT_LOG_DIR"
 COMMON_SOURCES=(
   "$ROOT_DIR/src/app_config.cpp"
   "$ROOT_DIR/src/capture_core.cpp"
+  "$ROOT_DIR/src/runtime_lifecycle.cpp"
+  "$ROOT_DIR/src/workflow_ui_model.cpp"
   "$ROOT_DIR/tests/test_support.cpp"
 )
 
@@ -24,7 +26,9 @@ SUITES=(
   test_capture_initialize
   test_capture_workflow
   test_capture_logging
+  test_runtime_lifecycle
   test_test_support
+  test_workflow_ui_model
 )
 
 for suite in "${SUITES[@]}"; do

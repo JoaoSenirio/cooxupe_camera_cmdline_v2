@@ -73,11 +73,10 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SpecSensorSdkDir)\bin\$(Platform);..\..\bin\$(Platform)\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>$(SpecSensorSdkDir)\bin\$(Platform)\SpecSensor.lib;SpecSensor.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SpecSensorSdkDir)\bin\$(Platform)\SpecSensor.lib;SpecSensor.lib;User32.lib;Shell32.lib;Comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>if exist "$(SpecSensorSdkDir)\bin\$(Platform)\*.*" xcopy /E /Y "$(SpecSensorSdkDir)\bin\$(Platform)\*.*" "$(OutDir)"
-if exist "..\..\bin\$(Platform)\*.*" xcopy /E /Y "..\..\bin\$(Platform)\*.*" "$(OutDir)"</Command>
+      <Command>if exist "$(SpecSensorSdkDir)\bin\$(Platform)\SpecSensor.dll" copy /Y "$(SpecSensorSdkDir)\bin\$(Platform)\SpecSensor.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -87,20 +86,19 @@ if exist "..\..\bin\$(Platform)\*.*" xcopy /E /Y "..\..\bin\$(Platform)\*.*" "$(
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <ConformanceMode>true</ConformanceMode>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(SpecSensorSdkDir)\include;$(SpecSensorSdkDir)\bin;$(SpecSensorSdkDir)\bin\$(Platform);..\..\include;$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SpecSensorSdkDir)\bin\$(Platform);..\..\bin\$(Platform)\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>$(SpecSensorSdkDir)\bin\$(Platform)\SpecSensor.lib;SpecSensor.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SpecSensorSdkDir)\bin\$(Platform)\SpecSensor.lib;SpecSensor.lib;User32.lib;Shell32.lib;Comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>if exist "$(SpecSensorSdkDir)\bin\$(Platform)\*.*" xcopy /E /Y "$(SpecSensorSdkDir)\bin\$(Platform)\*.*" "$(OutDir)"
-if exist "..\..\bin\$(Platform)\*.*" xcopy /E /Y "..\..\bin\$(Platform)\*.*" "$(OutDir)"</Command>
+      <Command>if exist "$(SpecSensorSdkDir)\bin\$(Platform)\SpecSensor.dll" copy /Y "$(SpecSensorSdkDir)\bin\$(Platform)\SpecSensor.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -108,17 +106,23 @@ if exist "..\..\bin\$(Platform)\*.*" xcopy /E /Y "..\..\bin\$(Platform)\*.*" "$(
     <ClCompile Include="src\capture_core.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\pipe_core.cpp" />
+    <ClCompile Include="src\runtime_lifecycle.cpp" />
     <ClCompile Include="src\save_core.cpp" />
     <ClCompile Include="src\specsensor_api_sdk.cpp" />
+    <ClCompile Include="src\ui_engine.cpp" />
+    <ClCompile Include="src\workflow_ui_model.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\app_config.h" />
     <ClInclude Include="src\capture_core.h" />
     <ClInclude Include="src\pipe_core.h" />
+    <ClInclude Include="src\runtime_lifecycle.h" />
     <ClInclude Include="src\save_core.h" />
     <ClInclude Include="src\specsensor_api.h" />
     <ClInclude Include="src\thread_queue.h" />
     <ClInclude Include="src\types.h" />
+    <ClInclude Include="src\ui_engine.h" />
+    <ClInclude Include="src\workflow_ui_model.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

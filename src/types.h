@@ -60,6 +60,8 @@ struct SaveEventBegin {
     std::string camera_name;
     std::string output_dir;
     std::string timestamp_tag;
+    std::int64_t expected_light_frames = 0;
+    std::int64_t expected_dark_frames = 0;
     int rgb_wavelength_nm[3] = {650, 550, 450};
     SensorSnapshot sensor;
     std::string acquisition_date_utc;
@@ -96,6 +98,90 @@ struct SaveEvent {
     SaveEventBegin begin;
     SaveEventChunk chunk;
     SaveEventEnd end;
+};
+
+enum class CaptureProgressType {
+    CaptureStarted,
+    CaptureProgress,
+    CaptureFinished
+};
+
+struct CaptureProgressEvent {
+    CaptureProgressType type = CaptureProgressType::CaptureStarted;
+    std::string sample_name;
+    CapturePhase phase = CapturePhase::Light;
+    std::int64_t light_frames_captured = 0;
+    std::int64_t dark_frames_captured = 0;
+    std::int64_t dark_frames_target = 0;
+    std::int64_t frame_size_bytes = 0;
+    double capture_elapsed_seconds = 0.0;
+    double phase_elapsed_seconds = 0.0;
+    double capture_target_seconds = 0.0;
+    double estimated_frame_rate_hz = 0.0;
+    bool success = false;
+    int sdk_error = 0;
+    std::string message;
+};
+
+enum class SaveProgressType {
+    JobStarted,
+    BytesWritten,
+    JobFinished
+};
+
+struct SaveProgressEvent {
+    SaveProgressType type = SaveProgressType::JobStarted;
+    std::uint64_t job_id = 0;
+    std::string sample_name;
+    std::uint64_t bytes_written = 0;
+    std::uint64_t total_bytes = 0;
+    double bytes_per_second = 0.0;
+    bool success = false;
+    std::string message;
+};
+
+enum class UiEventType {
+    Hide,
+    WorkflowUpdate,
+    Error,
+    Shutdown
+};
+
+enum class UiWorkflowStage {
+    None,
+    StartupConnecting,
+    CaptureStarting,
+    Capturing,
+    CaptureFinished,
+    Saving,
+    Completed,
+    Error
+};
+
+struct UiEvent {
+    UiEventType type = UiEventType::WorkflowUpdate;
+    UiWorkflowStage stage = UiWorkflowStage::None;
+    std::string title;
+    std::string detail;
+    int progress_percent = 0;
+    int eta_seconds = -1;
+    int auto_hide_delay_ms = 0;
+};
+
+enum class UiCommandType {
+    ExitRequested
+};
+
+struct UiCommand {
+    UiCommandType type = UiCommandType::ExitRequested;
+};
+
+enum class RuntimeState {
+    BootstrapInteractive,
+    ReadyBackground,
+    Busy,
+    FatalError,
+    Shutdown
 };
 
 #endif

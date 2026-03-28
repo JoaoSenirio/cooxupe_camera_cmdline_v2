@@ -402,6 +402,10 @@ bool SaveCore::enqueue_event(const SaveEvent& event) {
     return events_.push_for(event, enqueue_timeout_);
 }
 
+void SaveCore::set_progress_sink(std::function<void(const SaveProgressEvent&)> progress_sink) {
+    progress_sink_ = progress_sink;
+}
+
 bool SaveCore::handle_begin(const SaveEvent& event) {
     if (active_.open) {
         log_error("Received BeginJob while previous job is still open. Closing previous files.");
@@ -459,6 +463,12 @@ bool SaveCore::handle_begin(const SaveEvent& event) {
     active_.sensor = begin.sensor;
     active_.acquisition_date_utc = begin.acquisition_date_utc;
     active_.light_start_time_utc = begin.light_start_time_utc;
+    active_.expected_total_bytes = static_cast<std::uint64_t>(
+        (std::max<std::int64_t>(0, begin.expected_light_frames) +
+         std::max<std::int64_t>(0, begin.expected_dark_frames)) *
+        std::max<std::int64_t>(0, begin.sensor.frame_size_bytes));
+    active_.bytes_written = 0;
+    active_.started_at = std::chrono::steady_clock::now();
 
     active_.light_raw_path = JoinPath(capture_dir, acquisition_name + ".raw");
     active_.dark_raw_path = JoinPath(capture_dir, "DARKREF_" + acquisition_name + ".raw");
@@ -503,6 +513,13 @@ bool SaveCore::handle_begin(const SaveEvent& event) {
     log_info("BeginJob accepted. sample=" + begin.sample_name +
              " dir=" + acquisition_dir +
              " queue_job_id=" + std::to_string(event.job_id));
+
+    SaveProgressEvent progress;
+    progress.type = SaveProgressType::JobStarted;
+    progress.job_id = event.job_id;
+    progress.sample_name = begin.sample_name;
+    progress.total_bytes = active_.expected_total_bytes;
+    emit_progress(progress);
     return true;
 }
 
@@ -551,6 +568,20 @@ bool SaveCore::handle_chunk(const SaveEvent& event) {
         log_error(std::string("Failed writing ") + (dark_chunk ? "dark" : "light") + " raw data");
         return false;
     }
+
+    active_.bytes_written += static_cast<std::uint64_t>(chunk.bytes.size());
+    const double elapsed_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - active_.started_at).count();
+    SaveProgressEvent progress;
+    progress.type = SaveProgressType::BytesWritten;
+    progress.job_id = event.job_id;
+    progress.sample_name = active_.sample_name;
+    progress.bytes_written = active_.bytes_written;
+    progress.total_bytes = active_.expected_total_bytes;
+    progress.bytes_per_second = elapsed_seconds > 0.0
+                                    ? static_cast<double>(active_.bytes_written) / elapsed_seconds
+                                    : 0.0;
+    emit_progress(progress);
 
     if (!dark_chunk) {
         const int width = static_cast<int>(active_.sensor.image_width);
@@ -626,6 +657,25 @@ bool SaveCore::handle_end(const SaveEvent& event) {
         oss << " msg=\"" << end.message << "\"";
     }
     log_info(oss.str());
+
+    const bool finished_successfully = end.success && ok;
+    const double elapsed_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - active_.started_at).count();
+    SaveProgressEvent progress;
+    progress.type = SaveProgressType::JobFinished;
+    progress.job_id = event.job_id;
+    progress.sample_name = active_.sample_name;
+    progress.bytes_written = active_.bytes_written;
+    progress.total_bytes = std::max(active_.expected_total_bytes, active_.bytes_written);
+    progress.bytes_per_second = elapsed_seconds > 0.0
+                                    ? static_cast<double>(active_.bytes_written) / elapsed_seconds
+                                    : 0.0;
+    progress.success = finished_successfully;
+    progress.message = finished_successfully
+                           ? end.message
+                           : (end.message.empty() ? "Falha ao persistir arquivos da aquisição"
+                                                  : end.message);
+    emit_progress(progress);
 
     reset_active_job();
     return ok;
@@ -853,6 +903,12 @@ void SaveCore::log_info(const std::string& message) {
 
 void SaveCore::log_error(const std::string& message) {
     std::cerr << "[save] " << message << "\n";
+}
+
+void SaveCore::emit_progress(const SaveProgressEvent& event) {
+    if (progress_sink_) {
+        progress_sink_(event);
+    }
 }
 
 void SaveCore::worker_loop() {

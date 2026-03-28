@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -22,6 +23,7 @@ public:
     void stop();
 
     bool enqueue_event(const SaveEvent& event);
+    void set_progress_sink(std::function<void(const SaveProgressEvent&)> progress_sink);
 
 private:
     struct ActiveJob {
@@ -51,6 +53,9 @@ private:
         std::int64_t thumb_lines = 0;
         std::string acquisition_date_utc;
         std::string light_start_time_utc;
+        std::uint64_t expected_total_bytes = 0;
+        std::uint64_t bytes_written = 0;
+        std::chrono::steady_clock::time_point started_at = std::chrono::steady_clock::time_point{};
     };
 
     bool handle_begin(const SaveEvent& event);
@@ -66,6 +71,7 @@ private:
 
     void log_info(const std::string& message);
     void log_error(const std::string& message);
+    void emit_progress(const SaveProgressEvent& event);
 
     void worker_loop();
 
@@ -74,6 +80,7 @@ private:
     std::thread worker_;
     std::atomic<bool> started_{false};
     ActiveJob active_;
+    std::function<void(const SaveProgressEvent&)> progress_sink_;
 };
 
 #endif
