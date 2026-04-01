@@ -24,6 +24,7 @@ public:
 
     bool enqueue_event(const SaveEvent& event);
     void set_progress_sink(std::function<void(const SaveProgressEvent&)> progress_sink);
+    void set_frame_stream_sink(std::function<bool(const FrameStreamEvent&)> frame_stream_sink);
 
 private:
     struct ActiveJob {
@@ -47,10 +48,13 @@ private:
         int red_band_index = 0;
         int green_band_index = 0;
         int blue_band_index = 0;
-        std::vector<std::uint16_t> thumb_red;
-        std::vector<std::uint16_t> thumb_green;
-        std::vector<std::uint16_t> thumb_blue;
-        std::int64_t thumb_lines = 0;
+        std::vector<std::uint16_t> light_rgb_red;
+        std::vector<std::uint16_t> light_rgb_green;
+        std::vector<std::uint16_t> light_rgb_blue;
+        std::int64_t light_lines = 0;
+        bool frame_stream_active = false;
+        std::int64_t expected_light_frames = 0;
+        std::int64_t expected_dark_frames = 0;
         std::string acquisition_date_utc;
         std::string light_start_time_utc;
         std::uint64_t expected_total_bytes = 0;
@@ -68,6 +72,8 @@ private:
     bool write_drop_log(const std::string& path, std::int64_t drop_incidents,
                         std::int64_t dropped_frames, std::int64_t frames_recorded);
     bool write_rgb_png();
+    void emit_frame_stream(const FrameStreamEvent& event);
+    void disable_frame_stream(const std::string& reason);
 
     void log_info(const std::string& message);
     void log_error(const std::string& message);
@@ -81,6 +87,7 @@ private:
     std::atomic<bool> started_{false};
     ActiveJob active_;
     std::function<void(const SaveProgressEvent&)> progress_sink_;
+    std::function<bool(const FrameStreamEvent&)> frame_stream_sink_;
 };
 
 #endif

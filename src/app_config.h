@@ -23,6 +23,12 @@ struct AppConfig {
     std::string camera_name;
     std::string pipe_name;
     std::string log_file_path;
+    bool matlab_stream_enabled;
+    std::string matlab_stream_host;
+    int matlab_stream_port;
+    int matlab_stream_connect_timeout_ms;
+    int matlab_stream_send_timeout_ms;
+    int matlab_stream_queue_capacity;
 };
 
 inline AppConfig MakeDefaultConfig() {
@@ -48,6 +54,12 @@ inline AppConfig MakeDefaultConfig() {
     config.camera_name = "FX10";
     config.pipe_name = "\\\\.\\pipe\\specsensor_sample_pipe";
     config.log_file_path = "C:/SpecimOutput/specsensor_cli.log";
+    config.matlab_stream_enabled = false;
+    config.matlab_stream_host = "127.0.0.1";
+    config.matlab_stream_port = 55001;
+    config.matlab_stream_connect_timeout_ms = 200;
+    config.matlab_stream_send_timeout_ms = 200;
+    config.matlab_stream_queue_capacity = 8;
     return config;
 }
 

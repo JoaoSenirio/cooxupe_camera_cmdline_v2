@@ -17,6 +17,23 @@ int TestValidateConfig() {
     return 0;
 }
 
+int TestMatlabStreamConfigValidation() {
+    AppConfig config = MakeDefaultConfig();
+    std::string error;
+
+    config.matlab_stream_queue_capacity = 0;
+    TEST_ASSERT(!ValidateConfig(config, &error), "stream queue capacity must be validated");
+
+    config = MakeDefaultConfig();
+    config.matlab_stream_port = 70000;
+    TEST_ASSERT(!ValidateConfig(config, &error), "stream port must stay within TCP range");
+
+    config = MakeDefaultConfig();
+    config.matlab_stream_host.clear();
+    TEST_ASSERT(!ValidateConfig(config, &error), "stream host must not be empty");
+    return 0;
+}
+
 int TestBinningMap() {
     TEST_ASSERT(BinningValueToEnumIndex(1) == 0, "1x binning maps to 0");
     TEST_ASSERT(BinningValueToEnumIndex(2) == 1, "2x binning maps to 1");
@@ -31,6 +48,7 @@ int TestBinningMap() {
 int main() {
     return RunSuite("test_app_config", {
         {"ValidateConfig", TestValidateConfig},
+        {"MatlabStreamConfigValidation", TestMatlabStreamConfigValidation},
         {"BinningMap", TestBinningMap},
     });
 }

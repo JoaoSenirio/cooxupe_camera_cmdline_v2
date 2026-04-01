@@ -16,7 +16,10 @@ export TEST_ARTIFACTS_DIR="$ARTIFACT_LOG_DIR"
 COMMON_SOURCES=(
   "$ROOT_DIR/src/app_config.cpp"
   "$ROOT_DIR/src/capture_core.cpp"
+  "$ROOT_DIR/src/frame_stream_core.cpp"
+  "$ROOT_DIR/src/frame_stream_protocol.cpp"
   "$ROOT_DIR/src/runtime_lifecycle.cpp"
+  "$ROOT_DIR/src/save_core.cpp"
   "$ROOT_DIR/src/workflow_ui_model.cpp"
   "$ROOT_DIR/tests/test_support.cpp"
 )
@@ -26,7 +29,9 @@ SUITES=(
   test_capture_initialize
   test_capture_workflow
   test_capture_logging
+  test_frame_stream_protocol
   test_runtime_lifecycle
+  test_save_core_stream
   test_test_support
   test_workflow_ui_model
 )

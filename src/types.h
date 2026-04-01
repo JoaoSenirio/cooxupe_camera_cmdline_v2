@@ -140,6 +140,51 @@ struct SaveProgressEvent {
     std::string message;
 };
 
+enum class FrameStreamEventType {
+    JobBegin,
+    LightRgbBlock,
+    JobEnd
+};
+
+struct FrameStreamEventBegin {
+    std::string sample_name;
+    std::string camera_name;
+    std::string acquisition_name;
+    std::string final_png_path;
+    std::int64_t image_width = 0;
+    std::int64_t expected_light_frames = 0;
+    std::int64_t expected_dark_frames = 0;
+    std::int64_t source_byte_depth = 0;
+    int rgb_wavelength_nm[3] = {0, 0, 0};
+    int resolved_rgb_band_indices[3] = {0, 0, 0};
+};
+
+struct FrameStreamEventLightRgbBlock {
+    std::vector<std::uint16_t> rgb_pixels;
+    std::int64_t line_count = 0;
+    std::int64_t line_index_start = 0;
+    std::int64_t first_frame_number = 0;
+    std::int64_t last_frame_number = 0;
+    std::int64_t image_width = 0;
+};
+
+struct FrameStreamEventEnd {
+    bool success = false;
+    int sdk_error = 0;
+    std::string message;
+    std::int64_t light_frames = 0;
+    std::int64_t dark_frames = 0;
+    std::string final_png_path;
+};
+
+struct FrameStreamEvent {
+    FrameStreamEventType type = FrameStreamEventType::JobBegin;
+    std::uint64_t job_id = 0;
+    FrameStreamEventBegin begin;
+    FrameStreamEventLightRgbBlock light_rgb_block;
+    FrameStreamEventEnd end;
+};
+
 enum class UiEventType {
     Hide,
     WorkflowUpdate,

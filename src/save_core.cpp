@@ -49,9 +49,15 @@ std::string MakeLocalTimestampTag() {
 std::string NormalizePathSeparators(const std::string& path) {
     std::string normalized = path;
     for (std::size_t i = 0; i < normalized.size(); ++i) {
+#ifdef _WIN32
         if (normalized[i] == '/') {
             normalized[i] = '\\';
         }
+#else
+        if (normalized[i] == '\\') {
+            normalized[i] = '/';
+        }
+#endif
     }
     return normalized;
 }
@@ -94,7 +100,11 @@ std::string JoinPath(const std::string& base, const std::string& leaf) {
     if (tail == '\\' || tail == '/') {
         return base + leaf;
     }
+#ifdef _WIN32
     return base + "\\" + leaf;
+#else
+    return base + "/" + leaf;
+#endif
 }
 
 #ifdef _WIN32
@@ -137,7 +147,7 @@ bool CreateDirectoriesRecursive(const std::string& path) {
     for (std::size_t i = 0; i < normalized.size(); ++i) {
         current.push_back(normalized[i]);
 
-        const bool is_sep = (normalized[i] == '\\');
+        const bool is_sep = (normalized[i] == '\\' || normalized[i] == '/');
         const bool is_last = (i + 1 == normalized.size());
         if (!is_sep && !is_last) {
             continue;
@@ -149,7 +159,8 @@ bool CreateDirectoriesRecursive(const std::string& path) {
         if (current.size() == 2 && current[1] == ':') {
             continue;
         }
-        if (current.size() == 3 && current[1] == ':' && current[2] == '\\') {
+        if (current.size() == 3 && current[1] == ':' &&
+            (current[2] == '\\' || current[2] == '/')) {
             continue;
         }
 
@@ -173,7 +184,7 @@ bool CreateDirectoriesRecursive(const std::string& path) {
 #endif
     }
 
-    return DirectoryExists(normalized);
+    return DirectoryExists(NormalizePathSeparators(normalized));
 }
 
 int MapByteDepthToEnviDataType(std::int64_t byte_depth) {
@@ -406,6 +417,11 @@ void SaveCore::set_progress_sink(std::function<void(const SaveProgressEvent&)> p
     progress_sink_ = progress_sink;
 }
 
+void SaveCore::set_frame_stream_sink(
+    std::function<bool(const FrameStreamEvent&)> frame_stream_sink) {
+    frame_stream_sink_ = frame_stream_sink;
+}
+
 bool SaveCore::handle_begin(const SaveEvent& event) {
     if (active_.open) {
         log_error("Received BeginJob while previous job is still open. Closing previous files.");
@@ -461,6 +477,8 @@ bool SaveCore::handle_begin(const SaveEvent& event) {
     active_.acquisition_dir = acquisition_dir;
     active_.capture_dir = capture_dir;
     active_.sensor = begin.sensor;
+    active_.expected_light_frames = begin.expected_light_frames;
+    active_.expected_dark_frames = begin.expected_dark_frames;
     active_.acquisition_date_utc = begin.acquisition_date_utc;
     active_.light_start_time_utc = begin.light_start_time_utc;
     active_.expected_total_bytes = static_cast<std::uint64_t>(
@@ -509,6 +527,7 @@ bool SaveCore::handle_begin(const SaveEvent& event) {
     active_.red_band_index = ClampInt(active_.red_band_index, 0, max_band);
     active_.green_band_index = ClampInt(active_.green_band_index, 0, max_band);
     active_.blue_band_index = ClampInt(active_.blue_band_index, 0, max_band);
+    active_.frame_stream_active = static_cast<bool>(frame_stream_sink_);
 
     log_info("BeginJob accepted. sample=" + begin.sample_name +
              " dir=" + acquisition_dir +
@@ -520,6 +539,28 @@ bool SaveCore::handle_begin(const SaveEvent& event) {
     progress.sample_name = begin.sample_name;
     progress.total_bytes = active_.expected_total_bytes;
     emit_progress(progress);
+
+    if (active_.frame_stream_active) {
+        FrameStreamEvent stream_begin;
+        stream_begin.type = FrameStreamEventType::JobBegin;
+        stream_begin.job_id = event.job_id;
+        stream_begin.begin.sample_name = begin.sample_name;
+        stream_begin.begin.camera_name = camera_token;
+        stream_begin.begin.acquisition_name = acquisition_name;
+        stream_begin.begin.final_png_path = active_.png_path;
+        stream_begin.begin.image_width = active_.sensor.image_width;
+        stream_begin.begin.expected_light_frames = begin.expected_light_frames;
+        stream_begin.begin.expected_dark_frames = begin.expected_dark_frames;
+        stream_begin.begin.source_byte_depth = active_.sensor.byte_depth;
+        stream_begin.begin.rgb_wavelength_nm[0] = begin.rgb_wavelength_nm[0];
+        stream_begin.begin.rgb_wavelength_nm[1] = begin.rgb_wavelength_nm[1];
+        stream_begin.begin.rgb_wavelength_nm[2] = begin.rgb_wavelength_nm[2];
+        stream_begin.begin.resolved_rgb_band_indices[0] = active_.red_band_index;
+        stream_begin.begin.resolved_rgb_band_indices[1] = active_.green_band_index;
+        stream_begin.begin.resolved_rgb_band_indices[2] = active_.blue_band_index;
+        emit_frame_stream(stream_begin);
+    }
+
     return true;
 }
 
@@ -588,18 +629,41 @@ bool SaveCore::handle_chunk(const SaveEvent& event) {
         const int frame_size = static_cast<int>(active_.sensor.frame_size_bytes);
         const std::int64_t byte_depth = active_.sensor.byte_depth;
         const std::int64_t samples = active_.sensor.image_width;
+        const std::int64_t line_index_start = active_.light_lines;
+        std::vector<std::uint16_t> block_rgb;
+        block_rgb.reserve(static_cast<std::size_t>(chunk.frame_count) *
+                          static_cast<std::size_t>(width) * 3U);
 
         for (std::int64_t f = 0; f < chunk.frame_count; ++f) {
             const std::uint8_t* frame = chunk.bytes.data() + static_cast<std::size_t>(f) * frame_size;
             for (int x = 0; x < width; ++x) {
-                active_.thumb_red.push_back(ReadU16BilPixel(frame, byte_depth, samples,
-                                                            active_.red_band_index, x));
-                active_.thumb_green.push_back(ReadU16BilPixel(frame, byte_depth, samples,
-                                                              active_.green_band_index, x));
-                active_.thumb_blue.push_back(ReadU16BilPixel(frame, byte_depth, samples,
-                                                             active_.blue_band_index, x));
+                const std::uint16_t red = ReadU16BilPixel(frame, byte_depth, samples,
+                                                          active_.red_band_index, x);
+                const std::uint16_t green = ReadU16BilPixel(frame, byte_depth, samples,
+                                                            active_.green_band_index, x);
+                const std::uint16_t blue = ReadU16BilPixel(frame, byte_depth, samples,
+                                                           active_.blue_band_index, x);
+                active_.light_rgb_red.push_back(red);
+                active_.light_rgb_green.push_back(green);
+                active_.light_rgb_blue.push_back(blue);
+                block_rgb.push_back(red);
+                block_rgb.push_back(green);
+                block_rgb.push_back(blue);
             }
-            ++active_.thumb_lines;
+            ++active_.light_lines;
+        }
+
+        if (active_.frame_stream_active) {
+            FrameStreamEvent block_event;
+            block_event.type = FrameStreamEventType::LightRgbBlock;
+            block_event.job_id = event.job_id;
+            block_event.light_rgb_block.rgb_pixels.swap(block_rgb);
+            block_event.light_rgb_block.line_count = chunk.frame_count;
+            block_event.light_rgb_block.line_index_start = line_index_start;
+            block_event.light_rgb_block.first_frame_number = chunk.first_frame_number;
+            block_event.light_rgb_block.last_frame_number = chunk.last_frame_number;
+            block_event.light_rgb_block.image_width = active_.sensor.image_width;
+            emit_frame_stream(block_event);
         }
     }
 
@@ -644,6 +708,19 @@ bool SaveCore::handle_end(const SaveEvent& event) {
         if (!write_rgb_png()) {
             ok = false;
         }
+    }
+
+    if (active_.frame_stream_active) {
+        FrameStreamEvent stream_end;
+        stream_end.type = FrameStreamEventType::JobEnd;
+        stream_end.job_id = event.job_id;
+        stream_end.end.success = end.success && ok;
+        stream_end.end.sdk_error = end.sdk_error;
+        stream_end.end.message = end.message;
+        stream_end.end.light_frames = end.light_frames;
+        stream_end.end.dark_frames = end.dark_frames;
+        stream_end.end.final_png_path = active_.png_path;
+        emit_frame_stream(stream_end);
     }
 
     std::ostringstream oss;
@@ -809,27 +886,21 @@ bool SaveCore::write_drop_log(const std::string& path,
 
 bool SaveCore::write_rgb_png() {
     const int width = static_cast<int>(active_.sensor.image_width);
-    const int lines = static_cast<int>(active_.thumb_lines);
+    const int lines = static_cast<int>(active_.light_lines);
     if (width <= 0 || lines <= 0) {
-        log_error("Invalid thumbnail dimensions: width=" + std::to_string(width) +
+        log_error("Invalid RGB PNG dimensions: width=" + std::to_string(width) +
                   " lines=" + std::to_string(lines));
         return false;
     }
 
     const std::size_t expected =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(lines);
-    if (active_.thumb_red.size() != expected ||
-        active_.thumb_green.size() != expected ||
-        active_.thumb_blue.size() != expected) {
-        log_error("Thumbnail channel size mismatch");
+    if (active_.light_rgb_red.size() != expected ||
+        active_.light_rgb_green.size() != expected ||
+        active_.light_rgb_blue.size() != expected) {
+        log_error("RGB channel size mismatch");
         return false;
     }
-
-    const int max_width = 1920;
-    const int step_x = std::max(1, (width + max_width - 1) / std::max(1, max_width));
-    const int step_y = 1;
-    const int out_w = (width + step_x - 1) / step_x;
-    const int out_h = lines;
 
     std::uint16_t rmin = std::numeric_limits<std::uint16_t>::max();
     std::uint16_t gmin = std::numeric_limits<std::uint16_t>::max();
@@ -839,28 +910,26 @@ bool SaveCore::write_rgb_png() {
     std::uint16_t bmax = 0;
 
     for (std::size_t i = 0; i < expected; ++i) {
-        rmin = std::min(rmin, active_.thumb_red[i]);
-        gmin = std::min(gmin, active_.thumb_green[i]);
-        bmin = std::min(bmin, active_.thumb_blue[i]);
-        rmax = std::max(rmax, active_.thumb_red[i]);
-        gmax = std::max(gmax, active_.thumb_green[i]);
-        bmax = std::max(bmax, active_.thumb_blue[i]);
+        rmin = std::min(rmin, active_.light_rgb_red[i]);
+        gmin = std::min(gmin, active_.light_rgb_green[i]);
+        bmin = std::min(bmin, active_.light_rgb_blue[i]);
+        rmax = std::max(rmax, active_.light_rgb_red[i]);
+        gmax = std::max(gmax, active_.light_rgb_green[i]);
+        bmax = std::max(bmax, active_.light_rgb_blue[i]);
     }
 
     std::vector<std::uint8_t> raw;
-    raw.reserve(static_cast<std::size_t>(out_h) * (1 + static_cast<std::size_t>(out_w) * 3));
+    raw.reserve(static_cast<std::size_t>(lines) * (1 + static_cast<std::size_t>(width) * 3));
 
-    for (int y = 0; y < out_h; ++y) {
+    for (int y = 0; y < lines; ++y) {
         raw.push_back(0);
-        const int src_y = std::min(lines - 1, y * step_y);
-        for (int x = 0; x < out_w; ++x) {
-            const int src_x = std::min(width - 1, x * step_x);
+        for (int x = 0; x < width; ++x) {
             const std::size_t idx =
-                static_cast<std::size_t>(src_y) * static_cast<std::size_t>(width) +
-                static_cast<std::size_t>(src_x);
-            raw.push_back(NormalizeToByte(active_.thumb_red[idx], rmin, rmax));
-            raw.push_back(NormalizeToByte(active_.thumb_green[idx], gmin, gmax));
-            raw.push_back(NormalizeToByte(active_.thumb_blue[idx], bmin, bmax));
+                static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                static_cast<std::size_t>(x);
+            raw.push_back(NormalizeToByte(active_.light_rgb_red[idx], rmin, rmax));
+            raw.push_back(NormalizeToByte(active_.light_rgb_green[idx], gmin, gmax));
+            raw.push_back(NormalizeToByte(active_.light_rgb_blue[idx], bmin, bmax));
         }
     }
 
@@ -869,8 +938,8 @@ bool SaveCore::write_rgb_png() {
     png.insert(png.end(), signature.begin(), signature.end());
 
     std::vector<std::uint8_t> ihdr;
-    WriteBigEndian32(&ihdr, static_cast<std::uint32_t>(out_w));
-    WriteBigEndian32(&ihdr, static_cast<std::uint32_t>(out_h));
+    WriteBigEndian32(&ihdr, static_cast<std::uint32_t>(width));
+    WriteBigEndian32(&ihdr, static_cast<std::uint32_t>(lines));
     ihdr.push_back(8);
     ihdr.push_back(2);
     ihdr.push_back(0);
@@ -909,6 +978,25 @@ void SaveCore::emit_progress(const SaveProgressEvent& event) {
     if (progress_sink_) {
         progress_sink_(event);
     }
+}
+
+void SaveCore::emit_frame_stream(const FrameStreamEvent& event) {
+    if (!active_.frame_stream_active || !frame_stream_sink_) {
+        return;
+    }
+    if (!frame_stream_sink_(event)) {
+        disable_frame_stream("queue full or not started");
+    }
+}
+
+void SaveCore::disable_frame_stream(const std::string& reason) {
+    if (!active_.frame_stream_active) {
+        return;
+    }
+    active_.frame_stream_active = false;
+    log_error("Frame stream disabled for sample=" + active_.sample_name +
+              " job_id=" + std::to_string(active_.job_id) +
+              " reason=" + reason);
 }
 
 void SaveCore::worker_loop() {

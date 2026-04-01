@@ -16,6 +16,7 @@
 
 #include "app_config.h"
 #include "capture_core.h"
+#include "frame_stream_core.h"
 #include "pipe_core.h"
 #include "runtime_lifecycle.h"
 #include "save_core.h"
@@ -159,6 +160,7 @@ int RunApplication(const std::vector<std::string>& args) {
 
     SaveCore save_core(static_cast<std::size_t>(config.save_queue_capacity),
                        config.save_queue_push_timeout_ms);
+    FrameStreamCore frame_stream_core(static_cast<std::size_t>(config.matlab_stream_queue_capacity));
     save_core.set_progress_sink([&](const SaveProgressEvent& event) {
         {
             std::lock_guard<std::mutex> lock(save_progress_mutex);
@@ -174,6 +176,27 @@ int RunApplication(const std::vector<std::string>& args) {
         ui_engine.stop();
         capture_core.Shutdown();
         return 1;
+    }
+
+    bool frame_stream_running = false;
+    if (config.matlab_stream_enabled) {
+        frame_stream_running = frame_stream_core.start(config.matlab_stream_host,
+                                                       config.matlab_stream_port,
+                                                       config.matlab_stream_connect_timeout_ms,
+                                                       config.matlab_stream_send_timeout_ms);
+        if (frame_stream_running) {
+            capture_core.LogInfo("Frame stream worker started for Matlab at " +
+                                 config.matlab_stream_host + ":" +
+                                 std::to_string(config.matlab_stream_port));
+        } else {
+            capture_core.LogError("Failed to start Matlab frame stream worker; continuing without stream");
+        }
+    }
+
+    if (frame_stream_running) {
+        save_core.set_frame_stream_sink([&](const FrameStreamEvent& event) {
+            return frame_stream_core.enqueue_event(event);
+        });
     }
 
     capture_core.set_save_sink([&](const SaveEvent& event) {
@@ -418,6 +441,10 @@ int RunApplication(const std::vector<std::string>& args) {
     capture_core.LogInfo("Pipe server stopped");
     save_core.stop();
     capture_core.LogInfo("SaveCore stopped");
+    frame_stream_core.stop();
+    if (frame_stream_running) {
+        capture_core.LogInfo("FrameStreamCore stopped");
+    }
     {
         std::lock_guard<std::mutex> lock(ui_model_mutex);
         ui_engine.publish(ui_model.MakeHideEvent());

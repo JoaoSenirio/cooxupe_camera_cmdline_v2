@@ -53,6 +53,16 @@ bool ValidateConfig(const AppConfig& config, std::string* error) {
         oss << "pipe_name must not be empty";
     } else if (config.log_file_path.empty()) {
         oss << "log_file_path must not be empty";
+    } else if (config.matlab_stream_host.empty()) {
+        oss << "matlab_stream_host must not be empty";
+    } else if (config.matlab_stream_port <= 0 || config.matlab_stream_port > 65535) {
+        oss << "matlab_stream_port must be between 1 and 65535";
+    } else if (config.matlab_stream_connect_timeout_ms <= 0) {
+        oss << "matlab_stream_connect_timeout_ms must be > 0";
+    } else if (config.matlab_stream_send_timeout_ms <= 0) {
+        oss << "matlab_stream_send_timeout_ms must be > 0";
+    } else if (config.matlab_stream_queue_capacity <= 0) {
+        oss << "matlab_stream_queue_capacity must be > 0";
     }
 
     if (error != nullptr) {
