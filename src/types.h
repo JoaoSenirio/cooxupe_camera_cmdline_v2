@@ -2,6 +2,7 @@
 #define TYPES_H
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -48,13 +49,6 @@ struct SensorSnapshot {
     std::vector<double> fwhm_nm;
 };
 
-enum class SaveEventType {
-    BeginJob,
-    LightChunk,
-    DarkChunk,
-    EndJob
-};
-
 struct SaveEventBegin {
     std::string sample_name;
     std::string camera_name;
@@ -90,14 +84,6 @@ struct SaveEventEnd {
     std::string light_stop_time_utc;
     std::string dark_start_time_utc;
     std::string dark_stop_time_utc;
-};
-
-struct SaveEvent {
-    SaveEventType type = SaveEventType::BeginJob;
-    std::uint64_t job_id = 0;
-    SaveEventBegin begin;
-    SaveEventChunk chunk;
-    SaveEventEnd end;
 };
 
 enum class CaptureProgressType {
@@ -140,49 +126,26 @@ struct SaveProgressEvent {
     std::string message;
 };
 
-enum class FrameStreamEventType {
-    JobBegin,
-    LightRgbBlock,
-    JobEnd
+enum class WorkItemType {
+    BeginJob,
+    LightChunk,
+    DarkChunk,
+    EndJob
 };
 
-struct FrameStreamEventBegin {
-    std::string sample_name;
-    std::string camera_name;
-    std::string acquisition_name;
-    std::string final_png_path;
-    std::int64_t image_width = 0;
-    std::int64_t expected_light_frames = 0;
-    std::int64_t expected_dark_frames = 0;
-    std::int64_t source_byte_depth = 0;
-    int rgb_wavelength_nm[3] = {0, 0, 0};
-    int resolved_rgb_band_indices[3] = {0, 0, 0};
-};
-
-struct FrameStreamEventLightRgbBlock {
-    std::vector<std::uint16_t> rgb_pixels;
-    std::int64_t line_count = 0;
-    std::int64_t line_index_start = 0;
+struct WorkItemChunk {
+    std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+    std::int64_t frame_count = 0;
     std::int64_t first_frame_number = 0;
     std::int64_t last_frame_number = 0;
-    std::int64_t image_width = 0;
 };
 
-struct FrameStreamEventEnd {
-    bool success = false;
-    int sdk_error = 0;
-    std::string message;
-    std::int64_t light_frames = 0;
-    std::int64_t dark_frames = 0;
-    std::string final_png_path;
-};
-
-struct FrameStreamEvent {
-    FrameStreamEventType type = FrameStreamEventType::JobBegin;
+struct WorkItem {
+    WorkItemType type = WorkItemType::BeginJob;
     std::uint64_t job_id = 0;
-    FrameStreamEventBegin begin;
-    FrameStreamEventLightRgbBlock light_rgb_block;
-    FrameStreamEventEnd end;
+    SaveEventBegin begin;
+    WorkItemChunk chunk;
+    SaveEventEnd end;
 };
 
 enum class UiEventType {

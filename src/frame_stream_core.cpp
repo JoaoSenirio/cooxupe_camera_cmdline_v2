@@ -33,18 +33,20 @@ void* ToSocketPtr(SocketHandle socket) {
 
 }  // namespace
 
-FrameStreamCore::FrameStreamCore(std::size_t queue_capacity)
-    : events_(queue_capacity) {}
+FrameStreamCore::FrameStreamCore(std::size_t queue_capacity) {
+    (void)queue_capacity;
+}
 
 FrameStreamCore::~FrameStreamCore() {
     stop();
 }
 
-bool FrameStreamCore::start(const std::string& host,
+bool FrameStreamCore::start(SharedWorkQueue* work_queue,
+                            const std::string& host,
                             int port,
                             int connect_timeout_ms,
                             int send_timeout_ms) {
-    if (host.empty() || port <= 0 || port > 65535 ||
+    if (work_queue == nullptr || host.empty() || port <= 0 || port > 65535 ||
         connect_timeout_ms <= 0 || send_timeout_ms <= 0) {
         return false;
     }
@@ -54,6 +56,7 @@ bool FrameStreamCore::start(const std::string& host,
         return true;
     }
 
+    work_queue_ = work_queue;
     host_ = host;
     port_ = port;
     connect_timeout_ms_ = connect_timeout_ms;
@@ -68,18 +71,11 @@ void FrameStreamCore::stop() {
         return;
     }
 
-    events_.close();
     if (worker_.joinable()) {
         worker_.join();
     }
     reset_connection();
-}
-
-bool FrameStreamCore::enqueue_event(const FrameStreamEvent& event) {
-    if (!started_.load()) {
-        return false;
-    }
-    return events_.push(event);
+    work_queue_ = nullptr;
 }
 
 void FrameStreamCore::worker_loop() {
@@ -91,17 +87,30 @@ void FrameStreamCore::worker_loop() {
         return;
     }
 
-    FrameStreamEvent event;
-    while (events_.pop(&event)) {
-        handle_event(event);
+    if (work_queue_ != nullptr) {
+        SharedWorkQueue::Lease lease;
+        while (started_.load() && work_queue_->pop(SharedWorkConsumer::Stream, &lease)) {
+            const bool ok = lease.item != nullptr && handle_item(*lease.item);
+            if (!ok) {
+                const std::uint64_t job_id = lease.item ? lease.item->job_id : 0;
+                log_error("Stream consumer failed for job_id=" + std::to_string(job_id));
+                work_queue_->ack(lease, false, "stream consumer failed");
+                break;
+            }
+            work_queue_->ack(lease, true);
+        }
     }
 
     reset_connection();
     WSACleanup();
 #else
     log_info("Frame stream is only active on Windows; worker will stay idle");
-    FrameStreamEvent event;
-    while (events_.pop(&event)) {
+    if (work_queue_ != nullptr) {
+        SharedWorkQueue::Lease lease;
+        while (started_.load() && work_queue_->pop(SharedWorkConsumer::Stream, &lease)) {
+            work_queue_->ack(lease, false, "stream consumer unavailable on this platform");
+            break;
+        }
     }
 #endif
 }
@@ -123,61 +132,32 @@ void FrameStreamCore::reset_connection() {
     }
 #endif
     connection_.active = false;
-    connection_.job_disabled = false;
-    connection_.job_id = 0;
-    connection_.next_sequence = 1;
 }
 
-bool FrameStreamCore::handle_event(const FrameStreamEvent& event) {
-    if (event.type == FrameStreamEventType::JobBegin) {
+bool FrameStreamCore::handle_item(const WorkItem& item) {
+    if (item.type == WorkItemType::BeginJob) {
         reset_connection();
-        connection_.job_id = event.job_id;
-        connection_.job_disabled = false;
-        if (!ensure_connected_for_job(event.job_id)) {
-            connection_.job_disabled = true;
-            return true;
+        if (!ensure_connected()) {
+            return false;
         }
-        if (!send_event(event)) {
-            connection_.job_disabled = true;
-            reset_connection();
-        }
-        return true;
+    } else if (!connection_.active) {
+        return false;
     }
 
-    if (event.job_id != connection_.job_id || connection_.job_id == 0) {
-        return true;
-    }
-
-    if (connection_.job_disabled) {
-        if (event.type == FrameStreamEventType::JobEnd) {
-            reset_connection();
-        }
-        return true;
-    }
-
-    if (!connection_.active) {
-        connection_.job_disabled = true;
-        if (event.type == FrameStreamEventType::JobEnd) {
-            reset_connection();
-        }
-        return true;
-    }
-
-    if (!send_event(event)) {
-        connection_.job_disabled = true;
+    if (!send_item(item)) {
         reset_connection();
-        return true;
+        return false;
     }
 
-    if (event.type == FrameStreamEventType::JobEnd) {
+    if (item.type == WorkItemType::EndJob) {
         reset_connection();
     }
     return true;
 }
 
-bool FrameStreamCore::ensure_connected_for_job(std::uint64_t job_id) {
+bool FrameStreamCore::ensure_connected() {
 #ifdef _WIN32
-    if (connection_.active && connection_.job_id == job_id) {
+    if (connection_.active) {
         return true;
     }
 
@@ -242,14 +222,14 @@ bool FrameStreamCore::ensure_connected_for_job(std::uint64_t job_id) {
         non_blocking = 0;
         ioctlsocket(socket, FIONBIO, &non_blocking);
 
-        const DWORD send_timeout = static_cast<DWORD>(send_timeout_ms_);
+        const DWORD timeout = static_cast<DWORD>(send_timeout_ms_);
         setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO,
-                   reinterpret_cast<const char*>(&send_timeout), sizeof(send_timeout));
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+        setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
 
         connection_.socket = ToSocketPtr(socket);
         connection_.active = true;
-        connection_.job_id = job_id;
-        connection_.next_sequence = 1;
         connected = true;
         break;
     }
@@ -259,50 +239,108 @@ bool FrameStreamCore::ensure_connected_for_job(std::uint64_t job_id) {
     if (!connected) {
         log_error("Failed to connect to Matlab server at " + host_ + ":" + port_text.str());
     } else {
-        log_info("Connected to Matlab server at " + host_ + ":" + port_text.str() +
-                 " job_id=" + std::to_string(job_id));
+        log_info("Connected to Matlab server at " + host_ + ":" + port_text.str());
     }
 
     return connected;
 #else
-    (void)job_id;
     return false;
 #endif
 }
 
-bool FrameStreamCore::send_event(const FrameStreamEvent& event) {
+bool FrameStreamCore::send_item(const WorkItem& item) {
 #ifdef _WIN32
     if (!connection_.active || connection_.socket == nullptr) {
         return false;
     }
 
     std::string error;
-    std::vector<std::uint8_t> bytes;
-    if (!FrameStreamProtocol::SerializeEvent(event, connection_.next_sequence, &bytes, &error)) {
-        log_error("Failed to serialize frame stream event job_id=" + std::to_string(event.job_id) +
+    FrameStreamProtocol::SerializedMessage message;
+    if (!FrameStreamProtocol::SerializeWorkItem(item, &message, &error)) {
+        log_error("Failed to serialize stream item job_id=" + std::to_string(item.job_id) +
                   " error=" + error);
+        return false;
+    }
+
+    if (!send_bytes(message.header.data(), message.header.size())) {
+        return false;
+    }
+    if (!message.inline_payload.empty() &&
+        !send_bytes(message.inline_payload.data(), message.inline_payload.size())) {
+        return false;
+    }
+    if (message.external_payload != nullptr && !message.external_payload->empty() &&
+        !send_bytes(message.external_payload->data(), message.external_payload->size())) {
+        return false;
+    }
+
+    if (!receive_ack()) {
+        log_error("Matlab did not acknowledge stream item job_id=" + std::to_string(item.job_id));
+        return false;
+    }
+    return true;
+#else
+    (void)item;
+    return false;
+#endif
+}
+
+bool FrameStreamCore::send_bytes(const std::uint8_t* bytes, std::size_t size) {
+#ifdef _WIN32
+    if (!connection_.active || connection_.socket == nullptr || bytes == nullptr) {
         return false;
     }
 
     const SocketHandle socket = ToSocketHandle(connection_.socket);
     std::size_t sent = 0;
-    while (sent < bytes.size()) {
+    while (sent < size) {
         const int chunk = send(socket,
-                               reinterpret_cast<const char*>(bytes.data() + sent),
-                               static_cast<int>(bytes.size() - sent),
+                               reinterpret_cast<const char*>(bytes + sent),
+                               static_cast<int>(size - sent),
                                0);
         if (chunk == SOCKET_ERROR || chunk <= 0) {
-            log_error("send failed for job_id=" + std::to_string(event.job_id) +
-                      " error=" + std::to_string(WSAGetLastError()));
+            log_error("send failed error=" + std::to_string(WSAGetLastError()));
             return false;
         }
         sent += static_cast<std::size_t>(chunk);
     }
-
-    ++connection_.next_sequence;
     return true;
 #else
-    (void)event;
+    (void)bytes;
+    (void)size;
+    return false;
+#endif
+}
+
+bool FrameStreamCore::receive_ack() {
+#ifdef _WIN32
+    if (!connection_.active || connection_.socket == nullptr) {
+        return false;
+    }
+
+    std::vector<std::uint8_t> ack_bytes(FrameStreamProtocol::kAckBytes, 0);
+    const SocketHandle socket = ToSocketHandle(connection_.socket);
+    std::size_t received = 0;
+    while (received < ack_bytes.size()) {
+        const int chunk = recv(socket,
+                               reinterpret_cast<char*>(ack_bytes.data() + received),
+                               static_cast<int>(ack_bytes.size() - received),
+                               0);
+        if (chunk == SOCKET_ERROR || chunk <= 0) {
+            log_error("recv ack failed error=" + std::to_string(WSAGetLastError()));
+            return false;
+        }
+        received += static_cast<std::size_t>(chunk);
+    }
+
+    FrameStreamProtocol::Ack ack;
+    std::string error;
+    if (!FrameStreamProtocol::ParseAck(ack_bytes, &ack, &error)) {
+        log_error("Invalid ack from Matlab: " + error);
+        return false;
+    }
+    return ack.status == 0;
+#else
     return false;
 #endif
 }

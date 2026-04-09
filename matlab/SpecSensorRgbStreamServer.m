@@ -5,12 +5,20 @@ classdef SpecSensorRgbStreamServer < handle
         Server
         RxBuffer uint8 = uint8([])
         Job struct = struct()
-        LineCursor (1, 1) double = 0
-        RgbCubeRaw uint16 = uint16([])
+        HeaderBytes (1, 1) double = 12
+        AckBytes (1, 1) double = 8
+        LightFrameCursor (1, 1) double = 0
+        DarkFrameCursor (1, 1) double = 0
+        PayloadClass (1, :) char = 'uint16'
+        LightCubeRaw
+        DarkCubeRaw
+        RgbPreviewRaw
+        RgbTargetWavelengthNm (1, 3) double = [0 0 0]
+        ResolvedRgbBandIndices (1, 3) double = [1 1 1]
+        ResolvedRgbBandWavelengthNm (1, 3) double = [0 0 0]
         FigureHandle
         AxesHandle
         ImageHandle
-        HeaderBytes (1, 1) double = 40
     end
 
     methods
@@ -30,7 +38,7 @@ classdef SpecSensorRgbStreamServer < handle
 
             obj.Server = tcpserver(obj.Host, obj.Port, "ConnectionChangedFcn", ...
                 @(src, evt)obj.handleConnectionChanged(src, evt));
-            configureCallback(obj.Server, "byte", 1, @(src, evt)obj.handleData(src, evt));
+            configureCallback(obj.Server, "byte", obj.HeaderBytes, @(src, evt)obj.handleData(src, evt));
             fprintf("[matlab-stream] Listening on %s:%d\n", obj.Host, obj.Port);
         end
 
@@ -50,8 +58,10 @@ classdef SpecSensorRgbStreamServer < handle
         function handleConnectionChanged(obj, src, ~)
             if strcmpi(src.Connected, "on")
                 fprintf("[matlab-stream] Client connected\n");
+                obj.resetJobState();
             else
                 fprintf("[matlab-stream] Client disconnected\n");
+                obj.resetJobState();
             end
         end
 
@@ -69,20 +79,23 @@ classdef SpecSensorRgbStreamServer < handle
                 end
 
                 header = obj.parseHeader(obj.RxBuffer(1:obj.HeaderBytes));
-                totalBytes = obj.HeaderBytes + double(header.metadata_length) + double(header.payload_length);
+                totalBytes = obj.HeaderBytes + double(header.payload_length);
                 if numel(obj.RxBuffer) < totalBytes
                     return;
                 end
 
-                metadataBytes = obj.RxBuffer(obj.HeaderBytes + 1 : obj.HeaderBytes + double(header.metadata_length));
-                payloadOffset = obj.HeaderBytes + double(header.metadata_length) + 1;
-                payloadEnd = totalBytes;
-                payloadBytes = obj.RxBuffer(payloadOffset:payloadEnd);
+                payloadBytes = obj.RxBuffer(obj.HeaderBytes + 1 : totalBytes);
                 obj.RxBuffer = obj.RxBuffer(totalBytes + 1:end);
 
-                metadataText = native2unicode(metadataBytes(:).', "UTF-8");
-                metadata = jsondecode(metadataText);
-                obj.dispatchMessage(header, metadata, payloadBytes);
+                ackSuccess = true;
+                try
+                    obj.dispatchMessage(header, payloadBytes);
+                catch err
+                    ackSuccess = false;
+                    fprintf("[matlab-stream] Error processing message_type=%d: %s\n", ...
+                        header.message_type, err.message);
+                end
+                obj.writeAck(src, ackSuccess);
             end
         end
 
@@ -98,103 +111,145 @@ classdef SpecSensorRgbStreamServer < handle
 
             header = struct();
             header.version = double(typecast(uint8(bytes(5:6)), "uint16"));
-            header.header_bytes = double(typecast(uint8(bytes(7:8)), "uint16"));
-            header.message_type = double(typecast(uint8(bytes(9:12)), "uint32"));
-            header.flags = double(typecast(uint8(bytes(13:16)), "uint32"));
-            header.job_id = double(typecast(uint8(bytes(17:24)), "uint64"));
-            header.sequence = double(typecast(uint8(bytes(25:32)), "uint64"));
-            header.metadata_length = double(typecast(uint8(bytes(33:36)), "uint32"));
-            header.payload_length = double(typecast(uint8(bytes(37:40)), "uint32"));
+            header.message_type = double(typecast(uint8(bytes(7:8)), "uint16"));
+            header.payload_length = double(typecast(uint8(bytes(9:12)), "uint32"));
         end
 
-        function dispatchMessage(obj, header, metadata, payloadBytes)
+        function dispatchMessage(obj, header, payloadBytes)
             switch header.message_type
                 case 1
-                    obj.handleJobBegin(header, metadata);
+                    obj.handleBegin(payloadBytes);
                 case 2
-                    obj.handleLightRgbBlock(header, metadata, payloadBytes);
+                    obj.handleChunk(payloadBytes, false);
                 case 3
-                    obj.handleJobEnd(header, metadata);
+                    obj.handleChunk(payloadBytes, true);
+                case 4
+                    obj.handleEnd(payloadBytes);
                 otherwise
-                    fprintf("[matlab-stream] Ignoring unknown message_type=%d\n", header.message_type);
+                    error("SpecSensorRgbStreamServer:UnknownMessageType", ...
+                        "message_type desconhecido: %d", header.message_type);
             end
         end
 
-        function handleJobBegin(obj, header, metadata)
-            expectedLightFrames = max(0, double(metadata.expected_light_frames));
-            imageWidth = max(0, double(metadata.image_width));
+        function handleBegin(obj, payloadBytes)
+            if numel(payloadBytes) < 36
+                error("SpecSensorRgbStreamServer:ShortBegin", "Payload Begin incompleto");
+            end
 
+            imageWidth = double(typecast(uint8(payloadBytes(1:4)), "uint32"));
+            bandCount = double(typecast(uint8(payloadBytes(5:8)), "uint32"));
+            byteDepth = double(typecast(uint8(payloadBytes(9:12)), "uint32"));
+            frameSizeBytes = double(typecast(uint8(payloadBytes(13:16)), "uint32"));
+            expectedLightFrames = double(typecast(uint8(payloadBytes(17:20)), "uint32"));
+            expectedDarkFrames = double(typecast(uint8(payloadBytes(21:24)), "uint32"));
+            rgbTargets = double(typecast(uint8(payloadBytes(25:36)), "uint32"));
+
+            wavelengthsBytes = payloadBytes(37:end);
+            expectedWavelengthBytes = bandCount * 8;
+            if numel(wavelengthsBytes) ~= expectedWavelengthBytes
+                error("SpecSensorRgbStreamServer:BadWavelengthBlock", ...
+                    "Bloco de comprimentos de onda invalido. Esperado=%d Recebido=%d", ...
+                    expectedWavelengthBytes, numel(wavelengthsBytes));
+            end
+
+            wavelengthsNm = double(typecast(uint8(wavelengthsBytes), "double"));
+            if numel(wavelengthsNm) ~= bandCount
+                error("SpecSensorRgbStreamServer:BadBandCount", ...
+                    "Quantidade de bandas inconsistente");
+            end
+            if bandCount < 3
+                error("SpecSensorRgbStreamServer:TooFewBands", ...
+                    "Sao necessarias pelo menos 3 bandas para o preview RGB");
+            end
+
+            obj.PayloadClass = obj.classForByteDepth(byteDepth);
             obj.Job = struct( ...
-                "job_id", header.job_id, ...
-                "sample_name", string(metadata.sample_name), ...
-                "camera_name", string(metadata.camera_name), ...
-                "acquisition_name", string(metadata.acquisition_name), ...
-                "final_png_path", string(metadata.final_png_path), ...
+                "image_width", imageWidth, ...
+                "band_count", bandCount, ...
+                "byte_depth", byteDepth, ...
+                "frame_size_bytes", frameSizeBytes, ...
                 "expected_light_frames", expectedLightFrames, ...
-                "image_width", imageWidth);
-            obj.LineCursor = 0;
-            obj.RgbCubeRaw = zeros(expectedLightFrames, imageWidth, 3, "uint16");
+                "expected_dark_frames", expectedDarkFrames, ...
+                "wavelengths_nm", wavelengthsNm);
+            obj.LightFrameCursor = 0;
+            obj.DarkFrameCursor = 0;
+            obj.RgbTargetWavelengthNm = reshape(rgbTargets, 1, 3);
+            obj.ResolvedRgbBandIndices = obj.resolveRgbBandIndices(wavelengthsNm, obj.RgbTargetWavelengthNm);
+            obj.ResolvedRgbBandWavelengthNm = wavelengthsNm(obj.ResolvedRgbBandIndices);
+
+            obj.LightCubeRaw = zeros(imageWidth, bandCount, expectedLightFrames, obj.PayloadClass);
+            obj.DarkCubeRaw = zeros(imageWidth, bandCount, expectedDarkFrames, obj.PayloadClass);
+            obj.RgbPreviewRaw = zeros(expectedLightFrames, imageWidth, 3, obj.PayloadClass);
+
             obj.ensureFigure(imageWidth);
-            obj.updateFigureTitle(sprintf("%s | aguardando linhas", metadata.sample_name));
+            obj.updateFigureTitle(sprintf("LIGHT aguardando | RGB alvo=[%d %d %d]nm | bandas=[%.2f %.2f %.2f]nm", ...
+                obj.RgbTargetWavelengthNm(1), obj.RgbTargetWavelengthNm(2), obj.RgbTargetWavelengthNm(3), ...
+                obj.ResolvedRgbBandWavelengthNm(1), obj.ResolvedRgbBandWavelengthNm(2), ...
+                obj.ResolvedRgbBandWavelengthNm(3)));
         end
 
-        function handleLightRgbBlock(obj, ~, metadata, payloadBytes)
+        function handleChunk(obj, payloadBytes, isDark)
             if isempty(fieldnames(obj.Job))
+                error("SpecSensorRgbStreamServer:NoJob", "Chunk recebido sem Begin");
+            end
+
+            frameSizeBytes = obj.Job.frame_size_bytes;
+            if frameSizeBytes <= 0 || mod(numel(payloadBytes), frameSizeBytes) ~= 0
+                error("SpecSensorRgbStreamServer:BadChunkSize", ...
+                    "Chunk com payload invalido. bytes=%d frame_size=%d", ...
+                    numel(payloadBytes), frameSizeBytes);
+            end
+
+            frameCount = numel(payloadBytes) / frameSizeBytes;
+            values = typecast(uint8(payloadBytes), obj.PayloadClass);
+            block = reshape(values, [obj.Job.image_width, obj.Job.band_count, frameCount]);
+
+            if isDark
+                startIndex = obj.DarkFrameCursor + 1;
+                endIndex = obj.DarkFrameCursor + frameCount;
+                obj.DarkCubeRaw(:, :, startIndex:endIndex) = block;
+                obj.DarkFrameCursor = endIndex;
+                obj.updateFigureTitle(sprintf("DARK recebidos=%d", obj.DarkFrameCursor));
                 return;
             end
 
-            lineCount = double(metadata.line_count);
-            imageWidth = double(metadata.image_width);
-            if lineCount <= 0 || imageWidth <= 0
-                return;
-            end
+            startIndex = obj.LightFrameCursor + 1;
+            endIndex = obj.LightFrameCursor + frameCount;
+            obj.LightCubeRaw(:, :, startIndex:endIndex) = block;
 
-            values = typecast(uint8(payloadBytes), "uint16");
-            expectedValues = lineCount * imageWidth * 3;
-            if numel(values) ~= expectedValues
-                error("SpecSensorRgbStreamServer:PayloadMismatch", ...
-                    "Payload RGB inesperado. Esperado=%d Recebido=%d", expectedValues, numel(values));
-            end
-
-            block = permute(reshape(values, [3, imageWidth, lineCount]), [3, 2, 1]);
-            obj.ensureCapacity(obj.LineCursor + lineCount, imageWidth);
-            nextRange = obj.LineCursor + 1 : obj.LineCursor + lineCount;
-            obj.RgbCubeRaw(nextRange, :, :) = block;
-            obj.LineCursor = obj.LineCursor + lineCount;
+            obj.RgbPreviewRaw(startIndex:endIndex, :, 1) = permute(block(:, obj.ResolvedRgbBandIndices(1), :), [3 1 2]);
+            obj.RgbPreviewRaw(startIndex:endIndex, :, 2) = permute(block(:, obj.ResolvedRgbBandIndices(2), :), [3 1 2]);
+            obj.RgbPreviewRaw(startIndex:endIndex, :, 3) = permute(block(:, obj.ResolvedRgbBandIndices(3), :), [3 1 2]);
+            obj.LightFrameCursor = endIndex;
 
             obj.renderCurrentImage();
-            obj.updateFigureTitle(sprintf("%s | linhas=%d | frames=%d-%d", ...
-                obj.Job.sample_name, obj.LineCursor, ...
-                double(metadata.first_frame_number), double(metadata.last_frame_number)));
+            obj.updateFigureTitle(sprintf("LIGHT linhas=%d/%d | RGB=[%.2f %.2f %.2f]nm", ...
+                obj.LightFrameCursor, obj.Job.expected_light_frames, ...
+                obj.ResolvedRgbBandWavelengthNm(1), obj.ResolvedRgbBandWavelengthNm(2), ...
+                obj.ResolvedRgbBandWavelengthNm(3)));
         end
 
-        function handleJobEnd(obj, ~, metadata)
-            if isempty(fieldnames(obj.Job))
-                return;
+        function handleEnd(obj, payloadBytes)
+            if numel(payloadBytes) ~= 16
+                error("SpecSensorRgbStreamServer:BadEnd", "Payload End invalido");
             end
 
-            statusText = "falhou";
-            if isfield(metadata, "success") && metadata.success
-                statusText = "concluido";
-            end
+            successValue = payloadBytes(1) ~= 0;
+            sdkError = double(typecast(uint8(payloadBytes(5:8)), "int32"));
+            lightFrames = double(typecast(uint8(payloadBytes(9:12)), "uint32"));
+            darkFrames = double(typecast(uint8(payloadBytes(13:16)), "uint32"));
 
             obj.renderCurrentImage();
-            obj.updateFigureTitle(sprintf("%s | %s | png=%s", ...
-                obj.Job.sample_name, statusText, string(metadata.final_png_path)));
+            obj.updateFigureTitle(sprintf("fim success=%d sdk=%d light=%d dark=%d", ...
+                successValue, sdkError, lightFrames, darkFrames));
         end
 
-        function ensureCapacity(obj, requiredLines, imageWidth)
-            currentLines = size(obj.RgbCubeRaw, 1);
-            if currentLines >= requiredLines
-                return;
+        function indices = resolveRgbBandIndices(~, wavelengthsNm, rgbTargets)
+            indices = zeros(1, 3);
+            for channel = 1:3
+                [~, idx] = min(abs(wavelengthsNm - rgbTargets(channel)));
+                indices(channel) = idx;
             end
-
-            targetLines = max(requiredLines, max(64, currentLines * 2));
-            expanded = zeros(targetLines, imageWidth, 3, "uint16");
-            if currentLines > 0
-                expanded(1:currentLines, :, :) = obj.RgbCubeRaw;
-            end
-            obj.RgbCubeRaw = expanded;
         end
 
         function ensureFigure(obj, imageWidth)
@@ -211,14 +266,14 @@ classdef SpecSensorRgbStreamServer < handle
         end
 
         function renderCurrentImage(obj)
-            if obj.LineCursor <= 0
+            if obj.LightFrameCursor <= 0
                 return;
             end
 
-            raw = obj.RgbCubeRaw(1:obj.LineCursor, :, :);
+            raw = double(obj.RgbPreviewRaw(1:obj.LightFrameCursor, :, :));
             displayImage = zeros(size(raw, 1), size(raw, 2), 3, "double");
             for channel = 1:3
-                plane = double(raw(:, :, channel));
+                plane = raw(:, :, channel);
                 low = min(plane, [], "all");
                 high = max(plane, [], "all");
                 if high > low
@@ -240,6 +295,46 @@ classdef SpecSensorRgbStreamServer < handle
                 return;
             end
             title(obj.AxesHandle, char(textValue), "Interpreter", "none");
+        end
+
+        function writeAck(obj, src, success)
+            ackBytes = obj.buildAck(success);
+            write(src, ackBytes, "uint8");
+        end
+
+        function ackBytes = buildAck(obj, success)
+            statusValue = uint16(~success);
+            ackBytes = zeros(obj.AckBytes, 1, "uint8");
+            ackBytes(1:4) = uint8("SSFA");
+            ackBytes(5:6) = typecast(uint16(1), "uint8");
+            ackBytes(7:8) = typecast(statusValue, "uint8");
+        end
+
+        function resetJobState(obj)
+            obj.RxBuffer = uint8([]);
+            obj.Job = struct();
+            obj.LightFrameCursor = 0;
+            obj.DarkFrameCursor = 0;
+            obj.LightCubeRaw = [];
+            obj.DarkCubeRaw = [];
+            obj.RgbPreviewRaw = [];
+            obj.RgbTargetWavelengthNm = [0 0 0];
+            obj.ResolvedRgbBandIndices = [1 1 1];
+            obj.ResolvedRgbBandWavelengthNm = [0 0 0];
+        end
+
+        function className = classForByteDepth(~, byteDepth)
+            switch byteDepth
+                case 1
+                    className = 'uint8';
+                case 2
+                    className = 'uint16';
+                case 4
+                    className = 'uint32';
+                otherwise
+                    error("SpecSensorRgbStreamServer:UnsupportedByteDepth", ...
+                        "byte_depth nao suportado: %d", byteDepth);
+            end
         end
     end
 end

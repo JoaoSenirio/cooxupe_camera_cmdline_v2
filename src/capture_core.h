@@ -22,7 +22,7 @@ public:
     bool Initialize();
     bool CaptureSample(const AcquisitionJob& job, AcquisitionSummary* summary);
     void Shutdown();
-    void set_save_sink(std::function<bool(const SaveEvent&)> save_sink);
+    void set_work_sink(std::function<bool(WorkItem)> work_sink);
     void set_progress_sink(std::function<void(const CaptureProgressEvent&)> progress_sink);
 
     void RequestStop();
@@ -39,7 +39,7 @@ private:
 
     int RunCameraCommand(const wchar_t* command, const char* step);
     int DisposeFrameBuffer(void* frame_buffer);
-    bool EmitSaveEvent(const SaveEvent& event, AcquisitionSummary* summary);
+    bool EmitWorkItem(WorkItem item, AcquisitionSummary* summary);
     bool FillSensorSnapshot(SensorSnapshot* snapshot);
 
     void LogApiFailure(const char* step, int code);
@@ -52,7 +52,7 @@ private:
     bool shutdown_done_ = false;
     std::atomic<bool> stop_requested_{false};
     std::uint64_t next_job_id_ = 1;
-    std::function<bool(const SaveEvent&)> save_sink_;
+    std::function<bool(WorkItem)> work_sink_;
     std::function<void(const CaptureProgressEvent&)> progress_sink_;
 
     mutable std::mutex log_mutex_;

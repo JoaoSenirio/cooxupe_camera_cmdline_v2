@@ -3,44 +3,9 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
-#include <sstream>
 
 namespace FrameStreamProtocol {
 namespace {
-
-std::string EscapeJson(const std::string& text) {
-    std::string out;
-    out.reserve(text.size() + 8);
-    for (char c : text) {
-        switch (c) {
-            case '\\':
-                out += "\\\\";
-                break;
-            case '"':
-                out += "\\\"";
-                break;
-            case '\b':
-                out += "\\b";
-                break;
-            case '\f':
-                out += "\\f";
-                break;
-            case '\n':
-                out += "\\n";
-                break;
-            case '\r':
-                out += "\\r";
-                break;
-            case '\t':
-                out += "\\t";
-                break;
-            default:
-                out.push_back(c);
-                break;
-        }
-    }
-    return out;
-}
 
 void AppendU16(std::vector<std::uint8_t>* out, std::uint16_t value) {
     out->push_back(static_cast<std::uint8_t>(value & 0xFF));
@@ -54,9 +19,13 @@ void AppendU32(std::vector<std::uint8_t>* out, std::uint32_t value) {
     out->push_back(static_cast<std::uint8_t>((value >> 24) & 0xFF));
 }
 
-void AppendU64(std::vector<std::uint8_t>* out, std::uint64_t value) {
-    AppendU32(out, static_cast<std::uint32_t>(value & 0xFFFFFFFFULL));
-    AppendU32(out, static_cast<std::uint32_t>((value >> 32) & 0xFFFFFFFFULL));
+void AppendI32(std::vector<std::uint8_t>* out, std::int32_t value) {
+    AppendU32(out, static_cast<std::uint32_t>(value));
+}
+
+void AppendF64(std::vector<std::uint8_t>* out, double value) {
+    const std::uint8_t* raw = reinterpret_cast<const std::uint8_t*>(&value);
+    out->insert(out->end(), raw, raw + sizeof(double));
 }
 
 std::uint16_t ReadU16(const std::uint8_t* data) {
@@ -71,152 +40,140 @@ std::uint32_t ReadU32(const std::uint8_t* data) {
            (static_cast<std::uint32_t>(data[3]) << 24);
 }
 
-std::uint64_t ReadU64(const std::uint8_t* data) {
-    return static_cast<std::uint64_t>(ReadU32(data)) |
-           (static_cast<std::uint64_t>(ReadU32(data + 4)) << 32);
-}
-
 bool FitsU32(std::size_t size) {
     return size <= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
 }
 
-std::uint32_t MessageTypeForEvent(FrameStreamEventType type) {
+MessageType MessageTypeForItemType(WorkItemType type) {
     switch (type) {
-        case FrameStreamEventType::JobBegin:
-            return static_cast<std::uint32_t>(MessageType::JobBegin);
-        case FrameStreamEventType::LightRgbBlock:
-            return static_cast<std::uint32_t>(MessageType::LightRgbBlock);
-        case FrameStreamEventType::JobEnd:
-            return static_cast<std::uint32_t>(MessageType::JobEnd);
+        case WorkItemType::BeginJob:
+            return MessageType::Begin;
+        case WorkItemType::LightChunk:
+            return MessageType::LightBlock;
+        case WorkItemType::DarkChunk:
+            return MessageType::DarkBlock;
+        case WorkItemType::EndJob:
+            return MessageType::End;
     }
-    return 0;
+    return MessageType::Begin;
 }
 
-std::string BuildBeginMetadata(const FrameStreamEventBegin& begin) {
-    std::ostringstream oss;
-    oss << "{"
-        << "\"sample_name\":\"" << EscapeJson(begin.sample_name) << "\","
-        << "\"camera_name\":\"" << EscapeJson(begin.camera_name) << "\","
-        << "\"acquisition_name\":\"" << EscapeJson(begin.acquisition_name) << "\","
-        << "\"final_png_path\":\"" << EscapeJson(begin.final_png_path) << "\","
-        << "\"image_width\":" << begin.image_width << ","
-        << "\"expected_light_frames\":" << begin.expected_light_frames << ","
-        << "\"expected_dark_frames\":" << begin.expected_dark_frames << ","
-        << "\"source_byte_depth\":" << begin.source_byte_depth << ","
-        << "\"rgb_wavelength_nm\":[" << begin.rgb_wavelength_nm[0] << ","
-        << begin.rgb_wavelength_nm[1] << ","
-        << begin.rgb_wavelength_nm[2] << "],"
-        << "\"resolved_rgb_band_indices\":[" << begin.resolved_rgb_band_indices[0] << ","
-        << begin.resolved_rgb_band_indices[1] << ","
-        << begin.resolved_rgb_band_indices[2] << "]"
-        << "}";
-    return oss.str();
-}
-
-std::string BuildLightBlockMetadata(const FrameStreamEventLightRgbBlock& block) {
-    std::ostringstream oss;
-    oss << "{"
-        << "\"line_count\":" << block.line_count << ","
-        << "\"line_index_start\":" << block.line_index_start << ","
-        << "\"first_frame_number\":" << block.first_frame_number << ","
-        << "\"last_frame_number\":" << block.last_frame_number << ","
-        << "\"image_width\":" << block.image_width << ","
-        << "\"channel_count\":3,"
-        << "\"sample_format\":\"uint16_le\""
-        << "}";
-    return oss.str();
-}
-
-std::string BuildEndMetadata(const FrameStreamEventEnd& end) {
-    std::ostringstream oss;
-    oss << "{"
-        << "\"success\":" << (end.success ? "true" : "false") << ","
-        << "\"sdk_error\":" << end.sdk_error << ","
-        << "\"message\":\"" << EscapeJson(end.message) << "\","
-        << "\"light_frames\":" << end.light_frames << ","
-        << "\"dark_frames\":" << end.dark_frames << ","
-        << "\"final_png_path\":\"" << EscapeJson(end.final_png_path) << "\""
-        << "}";
-    return oss.str();
-}
-
-bool BuildPayload(const FrameStreamEvent& event,
-                  std::vector<std::uint8_t>* payload,
-                  std::string* error) {
-    payload->clear();
-    if (event.type != FrameStreamEventType::LightRgbBlock) {
-        return true;
-    }
-
-    const auto& block = event.light_rgb_block;
-    const std::size_t expected_pixels =
-        static_cast<std::size_t>(std::max<std::int64_t>(0, block.line_count)) *
-        static_cast<std::size_t>(std::max<std::int64_t>(0, block.image_width)) * 3U;
-    if (block.rgb_pixels.size() != expected_pixels) {
+bool BuildBeginPayload(const WorkItem& item,
+                       std::vector<std::uint8_t>* payload,
+                       std::string* error) {
+    const SaveEventBegin& begin = item.begin;
+    const SensorSnapshot& sensor = begin.sensor;
+    const std::size_t band_count = sensor.wavelengths_nm.size();
+    if (!FitsU32(band_count)) {
         if (error != nullptr) {
-            *error = "LightRgbBlock rgb_pixels size mismatch";
+            *error = "wavelength list exceeds 32-bit length limits";
         }
         return false;
     }
 
-    payload->reserve(block.rgb_pixels.size() * sizeof(std::uint16_t));
-    for (std::uint16_t sample : block.rgb_pixels) {
-        AppendU16(payload, sample);
+    payload->clear();
+    payload->reserve(36U + (band_count * sizeof(double)));
+    AppendU32(payload, static_cast<std::uint32_t>(std::max<std::int64_t>(0, sensor.image_width)));
+    AppendU32(payload, static_cast<std::uint32_t>(band_count));
+    AppendU32(payload, static_cast<std::uint32_t>(std::max<std::int64_t>(0, sensor.byte_depth)));
+    AppendU32(payload, static_cast<std::uint32_t>(std::max<std::int64_t>(0, sensor.frame_size_bytes)));
+    AppendU32(payload, static_cast<std::uint32_t>(std::max<std::int64_t>(0, begin.expected_light_frames)));
+    AppendU32(payload, static_cast<std::uint32_t>(std::max<std::int64_t>(0, begin.expected_dark_frames)));
+    AppendU32(payload, static_cast<std::uint32_t>(std::max(0, begin.rgb_wavelength_nm[0])));
+    AppendU32(payload, static_cast<std::uint32_t>(std::max(0, begin.rgb_wavelength_nm[1])));
+    AppendU32(payload, static_cast<std::uint32_t>(std::max(0, begin.rgb_wavelength_nm[2])));
+    for (double wavelength : sensor.wavelengths_nm) {
+        AppendF64(payload, wavelength);
     }
     return true;
 }
 
-std::string BuildMetadata(const FrameStreamEvent& event) {
-    switch (event.type) {
-        case FrameStreamEventType::JobBegin:
-            return BuildBeginMetadata(event.begin);
-        case FrameStreamEventType::LightRgbBlock:
-            return BuildLightBlockMetadata(event.light_rgb_block);
-        case FrameStreamEventType::JobEnd:
-            return BuildEndMetadata(event.end);
+bool BuildChunkPayload(const WorkItem& item,
+                       const std::vector<std::uint8_t>** payload,
+                       std::string* error) {
+    if (item.chunk.frame_count <= 0 || item.chunk.bytes == nullptr) {
+        if (error != nullptr) {
+            *error = "chunk payload is missing";
+        }
+        return false;
     }
-    return "{}";
+
+    *payload = item.chunk.bytes.get();
+    return true;
+}
+
+void BuildEndPayload(const WorkItem& item,
+                     std::vector<std::uint8_t>* payload) {
+    payload->clear();
+    payload->reserve(16);
+    payload->push_back(item.end.success ? 1U : 0U);
+    payload->push_back(0U);
+    payload->push_back(0U);
+    payload->push_back(0U);
+    AppendI32(payload, static_cast<std::int32_t>(item.end.sdk_error));
+    AppendU32(payload, static_cast<std::uint32_t>(std::max<std::int64_t>(0, item.end.light_frames)));
+    AppendU32(payload, static_cast<std::uint32_t>(std::max<std::int64_t>(0, item.end.dark_frames)));
+}
+
+void BuildHeader(MessageType message_type,
+                 std::uint32_t payload_length,
+                 std::vector<std::uint8_t>* header) {
+    header->clear();
+    header->reserve(kHeaderBytes);
+    header->insert(header->end(), kMagic, kMagic + 4);
+    AppendU16(header, kVersion);
+    AppendU16(header, static_cast<std::uint16_t>(message_type));
+    AppendU32(header, payload_length);
 }
 
 }  // namespace
 
-bool SerializeEvent(const FrameStreamEvent& event,
-                    std::uint64_t sequence,
-                    std::vector<std::uint8_t>* out,
-                    std::string* error) {
+bool SerializeWorkItem(const WorkItem& item,
+                       SerializedMessage* out,
+                       std::string* error) {
     if (out == nullptr) {
         if (error != nullptr) {
-            *error = "SerializeEvent requires a non-null output buffer";
+            *error = "SerializeWorkItem requires a non-null output";
         }
         return false;
     }
 
-    std::vector<std::uint8_t> payload;
-    if (!BuildPayload(event, &payload, error)) {
-        return false;
-    }
+    out->message_type = MessageTypeForItemType(item.type);
+    out->inline_payload.clear();
+    out->external_payload = nullptr;
 
-    const std::string metadata = BuildMetadata(event);
-    if (!FitsU32(metadata.size()) || !FitsU32(payload.size())) {
-        if (error != nullptr) {
-            *error = "Frame stream message exceeds 32-bit length limits";
+    if (item.type == WorkItemType::BeginJob) {
+        if (!BuildBeginPayload(item, &out->inline_payload, error)) {
+            return false;
         }
-        return false;
+        BuildHeader(out->message_type,
+                    static_cast<std::uint32_t>(out->inline_payload.size()),
+                    &out->header);
+        return true;
     }
 
-    out->clear();
-    out->reserve(kHeaderBytes + metadata.size() + payload.size());
-    out->insert(out->end(), kMagic, kMagic + 4);
-    AppendU16(out, kVersion);
-    AppendU16(out, static_cast<std::uint16_t>(kHeaderBytes));
-    AppendU32(out, MessageTypeForEvent(event.type));
-    AppendU32(out, 0U);
-    AppendU64(out, event.job_id);
-    AppendU64(out, sequence);
-    AppendU32(out, static_cast<std::uint32_t>(metadata.size()));
-    AppendU32(out, static_cast<std::uint32_t>(payload.size()));
-    out->insert(out->end(), metadata.begin(), metadata.end());
-    out->insert(out->end(), payload.begin(), payload.end());
+    if (item.type == WorkItemType::LightChunk || item.type == WorkItemType::DarkChunk) {
+        const std::vector<std::uint8_t>* payload = nullptr;
+        if (!BuildChunkPayload(item, &payload, error)) {
+            return false;
+        }
+        if (!FitsU32(payload->size())) {
+            if (error != nullptr) {
+                *error = "chunk payload exceeds 32-bit length limits";
+            }
+            return false;
+        }
+        out->external_payload = payload;
+        BuildHeader(out->message_type,
+                    static_cast<std::uint32_t>(payload->size()),
+                    &out->header);
+        return true;
+    }
+
+    BuildEndPayload(item, &out->inline_payload);
+    BuildHeader(out->message_type,
+                static_cast<std::uint32_t>(out->inline_payload.size()),
+                &out->header);
     return true;
 }
 
@@ -236,13 +193,52 @@ bool ParseHeader(const std::vector<std::uint8_t>& bytes, Header* header, std::st
 
     std::memcpy(header->magic, bytes.data(), 4);
     header->version = ReadU16(bytes.data() + 4);
-    header->header_bytes = ReadU16(bytes.data() + 6);
-    header->message_type = ReadU32(bytes.data() + 8);
-    header->flags = ReadU32(bytes.data() + 12);
-    header->job_id = ReadU64(bytes.data() + 16);
-    header->sequence = ReadU64(bytes.data() + 24);
-    header->metadata_length = ReadU32(bytes.data() + 32);
-    header->payload_length = ReadU32(bytes.data() + 36);
+    header->message_type = ReadU16(bytes.data() + 6);
+    header->payload_length = ReadU32(bytes.data() + 8);
+    return true;
+}
+
+void BuildAck(bool success, std::vector<std::uint8_t>* out) {
+    if (out == nullptr) {
+        return;
+    }
+
+    out->clear();
+    out->reserve(kAckBytes);
+    out->insert(out->end(), kAckMagic, kAckMagic + 4);
+    AppendU16(out, kVersion);
+    AppendU16(out, success ? 0U : 1U);
+}
+
+bool ParseAck(const std::vector<std::uint8_t>& bytes, Ack* ack, std::string* error) {
+    if (ack == nullptr) {
+        if (error != nullptr) {
+            *error = "ParseAck requires a non-null ack";
+        }
+        return false;
+    }
+    if (bytes.size() < kAckBytes) {
+        if (error != nullptr) {
+            *error = "Ack buffer is too small";
+        }
+        return false;
+    }
+
+    std::memcpy(ack->magic, bytes.data(), 4);
+    ack->version = ReadU16(bytes.data() + 4);
+    ack->status = ReadU16(bytes.data() + 6);
+    if (std::memcmp(ack->magic, kAckMagic, 4) != 0) {
+        if (error != nullptr) {
+            *error = "Ack magic mismatch";
+        }
+        return false;
+    }
+    if (ack->version != kVersion) {
+        if (error != nullptr) {
+            *error = "Ack version mismatch";
+        }
+        return false;
+    }
     return true;
 }
 

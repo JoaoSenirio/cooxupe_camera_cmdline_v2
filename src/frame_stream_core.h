@@ -7,7 +7,7 @@
 #include <string>
 #include <thread>
 
-#include "thread_queue.h"
+#include "shared_work_queue.h"
 #include "types.h"
 
 class FrameStreamCore {
@@ -15,17 +15,16 @@ public:
     explicit FrameStreamCore(std::size_t queue_capacity = 8);
     ~FrameStreamCore();
 
-    bool start(const std::string& host, int port, int connect_timeout_ms, int send_timeout_ms);
+    bool start(SharedWorkQueue* work_queue,
+               const std::string& host,
+               int port,
+               int connect_timeout_ms,
+               int send_timeout_ms);
     void stop();
-
-    bool enqueue_event(const FrameStreamEvent& event);
 
 private:
     struct ConnectionState {
         bool active = false;
-        bool job_disabled = false;
-        std::uint64_t job_id = 0;
-        std::uint64_t next_sequence = 1;
 #ifdef _WIN32
         void* socket = nullptr;
 #endif
@@ -35,13 +34,15 @@ private:
     void log_info(const std::string& message);
     void log_error(const std::string& message);
     void reset_connection();
-    bool handle_event(const FrameStreamEvent& event);
-    bool ensure_connected_for_job(std::uint64_t job_id);
-    bool send_event(const FrameStreamEvent& event);
+    bool handle_item(const WorkItem& item);
+    bool ensure_connected();
+    bool send_item(const WorkItem& item);
+    bool send_bytes(const std::uint8_t* bytes, std::size_t size);
+    bool receive_ack();
 
-    ThreadQueue<FrameStreamEvent> events_;
     std::thread worker_;
     std::atomic<bool> started_{false};
+    SharedWorkQueue* work_queue_ = nullptr;
     std::string host_;
     int port_ = 0;
     int connect_timeout_ms_ = 0;

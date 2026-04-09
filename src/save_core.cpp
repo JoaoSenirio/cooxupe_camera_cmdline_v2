@@ -376,20 +376,26 @@ std::vector<std::uint8_t> ZlibStore(const std::vector<std::uint8_t>& input) {
 }  // namespace
 
 SaveCore::SaveCore(std::size_t queue_capacity, int enqueue_timeout_ms)
-    : events_(queue_capacity),
-      enqueue_timeout_(std::chrono::milliseconds(
-          enqueue_timeout_ms > 0 ? enqueue_timeout_ms : 2000)) {}
+    : started_(false) {
+    (void)queue_capacity;
+    (void)enqueue_timeout_ms;
+}
 
 SaveCore::~SaveCore() {
     stop();
 }
 
-bool SaveCore::start() {
+bool SaveCore::start(SharedWorkQueue* work_queue) {
+    if (work_queue == nullptr) {
+        return false;
+    }
+
     bool expected = false;
     if (!started_.compare_exchange_strong(expected, true)) {
         return true;
     }
 
+    work_queue_ = work_queue;
     worker_ = std::thread(&SaveCore::worker_loop, this);
     return true;
 }
@@ -400,36 +406,24 @@ void SaveCore::stop() {
         return;
     }
 
-    events_.close();
     if (worker_.joinable()) {
         worker_.join();
     }
-}
-
-bool SaveCore::enqueue_event(const SaveEvent& event) {
-    if (!started_.load()) {
-        return false;
-    }
-    return events_.push_for(event, enqueue_timeout_);
+    work_queue_ = nullptr;
 }
 
 void SaveCore::set_progress_sink(std::function<void(const SaveProgressEvent&)> progress_sink) {
     progress_sink_ = progress_sink;
 }
 
-void SaveCore::set_frame_stream_sink(
-    std::function<bool(const FrameStreamEvent&)> frame_stream_sink) {
-    frame_stream_sink_ = frame_stream_sink;
-}
-
-bool SaveCore::handle_begin(const SaveEvent& event) {
+bool SaveCore::handle_begin(const WorkItem& item) {
     if (active_.open) {
         log_error("Received BeginJob while previous job is still open. Closing previous files.");
         close_open_files();
         reset_active_job();
     }
 
-    const SaveEventBegin& begin = event.begin;
+    const SaveEventBegin& begin = item.begin;
     const std::string root_dir = NormalizePathSeparators(begin.output_dir);
     if (root_dir.empty()) {
         log_error("BeginJob rejected: output_dir is empty");
@@ -469,7 +463,7 @@ bool SaveCore::handle_begin(const SaveEvent& event) {
         return false;
     }
 
-    active_.job_id = event.job_id;
+    active_.job_id = item.job_id;
     active_.open = true;
     active_.sample_name = begin.sample_name;
     active_.camera_name = camera_token;
@@ -527,55 +521,33 @@ bool SaveCore::handle_begin(const SaveEvent& event) {
     active_.red_band_index = ClampInt(active_.red_band_index, 0, max_band);
     active_.green_band_index = ClampInt(active_.green_band_index, 0, max_band);
     active_.blue_band_index = ClampInt(active_.blue_band_index, 0, max_band);
-    active_.frame_stream_active = static_cast<bool>(frame_stream_sink_);
 
     log_info("BeginJob accepted. sample=" + begin.sample_name +
              " dir=" + acquisition_dir +
-             " queue_job_id=" + std::to_string(event.job_id));
+             " queue_job_id=" + std::to_string(item.job_id));
 
     SaveProgressEvent progress;
     progress.type = SaveProgressType::JobStarted;
-    progress.job_id = event.job_id;
+    progress.job_id = item.job_id;
     progress.sample_name = begin.sample_name;
     progress.total_bytes = active_.expected_total_bytes;
     emit_progress(progress);
 
-    if (active_.frame_stream_active) {
-        FrameStreamEvent stream_begin;
-        stream_begin.type = FrameStreamEventType::JobBegin;
-        stream_begin.job_id = event.job_id;
-        stream_begin.begin.sample_name = begin.sample_name;
-        stream_begin.begin.camera_name = camera_token;
-        stream_begin.begin.acquisition_name = acquisition_name;
-        stream_begin.begin.final_png_path = active_.png_path;
-        stream_begin.begin.image_width = active_.sensor.image_width;
-        stream_begin.begin.expected_light_frames = begin.expected_light_frames;
-        stream_begin.begin.expected_dark_frames = begin.expected_dark_frames;
-        stream_begin.begin.source_byte_depth = active_.sensor.byte_depth;
-        stream_begin.begin.rgb_wavelength_nm[0] = begin.rgb_wavelength_nm[0];
-        stream_begin.begin.rgb_wavelength_nm[1] = begin.rgb_wavelength_nm[1];
-        stream_begin.begin.rgb_wavelength_nm[2] = begin.rgb_wavelength_nm[2];
-        stream_begin.begin.resolved_rgb_band_indices[0] = active_.red_band_index;
-        stream_begin.begin.resolved_rgb_band_indices[1] = active_.green_band_index;
-        stream_begin.begin.resolved_rgb_band_indices[2] = active_.blue_band_index;
-        emit_frame_stream(stream_begin);
-    }
-
     return true;
 }
 
-bool SaveCore::handle_chunk(const SaveEvent& event) {
+bool SaveCore::handle_chunk(const WorkItem& item) {
     if (!active_.open) {
         log_error("Chunk received without active job");
         return false;
     }
-    if (event.job_id != active_.job_id) {
+    if (item.job_id != active_.job_id) {
         log_error("Chunk job_id mismatch. expected=" + std::to_string(active_.job_id) +
-                  " got=" + std::to_string(event.job_id));
+                  " got=" + std::to_string(item.job_id));
         return false;
     }
 
-    const SaveEventChunk& chunk = event.chunk;
+    const WorkItemChunk& chunk = item.chunk;
     if (chunk.frame_count <= 0) {
         return true;
     }
@@ -589,33 +561,33 @@ bool SaveCore::handle_chunk(const SaveEvent& event) {
     const std::size_t expected_bytes =
         static_cast<std::size_t>(chunk.frame_count) *
         static_cast<std::size_t>(active_.sensor.frame_size_bytes);
-    if (chunk.bytes.size() != expected_bytes) {
+    if (!chunk.bytes || chunk.bytes->size() != expected_bytes) {
         log_error("Chunk size mismatch. expected=" + std::to_string(expected_bytes) +
-                  " got=" + std::to_string(chunk.bytes.size()));
+                  " got=" + std::to_string(chunk.bytes ? chunk.bytes->size() : 0));
         return false;
     }
 
     std::ofstream* out = nullptr;
-    const bool dark_chunk = event.type == SaveEventType::DarkChunk;
+    const bool dark_chunk = item.type == WorkItemType::DarkChunk;
     if (dark_chunk) {
         out = &active_.dark_raw_file;
     } else {
         out = &active_.light_raw_file;
     }
 
-    out->write(reinterpret_cast<const char*>(chunk.bytes.data()),
-               static_cast<std::streamsize>(chunk.bytes.size()));
+    out->write(reinterpret_cast<const char*>(chunk.bytes->data()),
+               static_cast<std::streamsize>(chunk.bytes->size()));
     if (!out->good()) {
         log_error(std::string("Failed writing ") + (dark_chunk ? "dark" : "light") + " raw data");
         return false;
     }
 
-    active_.bytes_written += static_cast<std::uint64_t>(chunk.bytes.size());
+    active_.bytes_written += static_cast<std::uint64_t>(chunk.bytes->size());
     const double elapsed_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - active_.started_at).count();
     SaveProgressEvent progress;
     progress.type = SaveProgressType::BytesWritten;
-    progress.job_id = event.job_id;
+    progress.job_id = item.job_id;
     progress.sample_name = active_.sample_name;
     progress.bytes_written = active_.bytes_written;
     progress.total_bytes = active_.expected_total_bytes;
@@ -629,13 +601,10 @@ bool SaveCore::handle_chunk(const SaveEvent& event) {
         const int frame_size = static_cast<int>(active_.sensor.frame_size_bytes);
         const std::int64_t byte_depth = active_.sensor.byte_depth;
         const std::int64_t samples = active_.sensor.image_width;
-        const std::int64_t line_index_start = active_.light_lines;
-        std::vector<std::uint16_t> block_rgb;
-        block_rgb.reserve(static_cast<std::size_t>(chunk.frame_count) *
-                          static_cast<std::size_t>(width) * 3U);
 
         for (std::int64_t f = 0; f < chunk.frame_count; ++f) {
-            const std::uint8_t* frame = chunk.bytes.data() + static_cast<std::size_t>(f) * frame_size;
+            const std::uint8_t* frame =
+                chunk.bytes->data() + static_cast<std::size_t>(f) * frame_size;
             for (int x = 0; x < width; ++x) {
                 const std::uint16_t red = ReadU16BilPixel(frame, byte_depth, samples,
                                                           active_.red_band_index, x);
@@ -646,42 +615,26 @@ bool SaveCore::handle_chunk(const SaveEvent& event) {
                 active_.light_rgb_red.push_back(red);
                 active_.light_rgb_green.push_back(green);
                 active_.light_rgb_blue.push_back(blue);
-                block_rgb.push_back(red);
-                block_rgb.push_back(green);
-                block_rgb.push_back(blue);
             }
             ++active_.light_lines;
-        }
-
-        if (active_.frame_stream_active) {
-            FrameStreamEvent block_event;
-            block_event.type = FrameStreamEventType::LightRgbBlock;
-            block_event.job_id = event.job_id;
-            block_event.light_rgb_block.rgb_pixels.swap(block_rgb);
-            block_event.light_rgb_block.line_count = chunk.frame_count;
-            block_event.light_rgb_block.line_index_start = line_index_start;
-            block_event.light_rgb_block.first_frame_number = chunk.first_frame_number;
-            block_event.light_rgb_block.last_frame_number = chunk.last_frame_number;
-            block_event.light_rgb_block.image_width = active_.sensor.image_width;
-            emit_frame_stream(block_event);
         }
     }
 
     return true;
 }
 
-bool SaveCore::handle_end(const SaveEvent& event) {
+bool SaveCore::handle_end(const WorkItem& item) {
     if (!active_.open) {
         log_error("EndJob received without active job");
         return false;
     }
-    if (event.job_id != active_.job_id) {
+    if (item.job_id != active_.job_id) {
         log_error("EndJob job_id mismatch. expected=" + std::to_string(active_.job_id) +
-                  " got=" + std::to_string(event.job_id));
+                  " got=" + std::to_string(item.job_id));
         return false;
     }
 
-    const SaveEventEnd& end = event.end;
+    const SaveEventEnd& end = item.end;
     close_open_files();
 
     bool ok = true;
@@ -710,19 +663,6 @@ bool SaveCore::handle_end(const SaveEvent& event) {
         }
     }
 
-    if (active_.frame_stream_active) {
-        FrameStreamEvent stream_end;
-        stream_end.type = FrameStreamEventType::JobEnd;
-        stream_end.job_id = event.job_id;
-        stream_end.end.success = end.success && ok;
-        stream_end.end.sdk_error = end.sdk_error;
-        stream_end.end.message = end.message;
-        stream_end.end.light_frames = end.light_frames;
-        stream_end.end.dark_frames = end.dark_frames;
-        stream_end.end.final_png_path = active_.png_path;
-        emit_frame_stream(stream_end);
-    }
-
     std::ostringstream oss;
     oss << "EndJob sample=" << active_.sample_name
         << " success=" << (end.success ? "true" : "false")
@@ -740,7 +680,7 @@ bool SaveCore::handle_end(const SaveEvent& event) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - active_.started_at).count();
     SaveProgressEvent progress;
     progress.type = SaveProgressType::JobFinished;
-    progress.job_id = event.job_id;
+    progress.job_id = item.job_id;
     progress.sample_name = active_.sample_name;
     progress.bytes_written = active_.bytes_written;
     progress.total_bytes = std::max(active_.expected_total_bytes, active_.bytes_written);
@@ -980,42 +920,34 @@ void SaveCore::emit_progress(const SaveProgressEvent& event) {
     }
 }
 
-void SaveCore::emit_frame_stream(const FrameStreamEvent& event) {
-    if (!active_.frame_stream_active || !frame_stream_sink_) {
-        return;
-    }
-    if (!frame_stream_sink_(event)) {
-        disable_frame_stream("queue full or not started");
-    }
-}
-
-void SaveCore::disable_frame_stream(const std::string& reason) {
-    if (!active_.frame_stream_active) {
-        return;
-    }
-    active_.frame_stream_active = false;
-    log_error("Frame stream disabled for sample=" + active_.sample_name +
-              " job_id=" + std::to_string(active_.job_id) +
-              " reason=" + reason);
-}
-
 void SaveCore::worker_loop() {
-    SaveEvent event;
-    while (events_.pop(&event)) {
+    if (work_queue_ == nullptr) {
+        return;
+    }
+
+    SharedWorkQueue::Lease lease;
+    while (started_.load() && work_queue_->pop(SharedWorkConsumer::Save, &lease)) {
         bool ok = false;
-        if (event.type == SaveEventType::BeginJob) {
-            ok = handle_begin(event);
-        } else if (event.type == SaveEventType::LightChunk ||
-                   event.type == SaveEventType::DarkChunk) {
-            ok = handle_chunk(event);
-        } else if (event.type == SaveEventType::EndJob) {
-            ok = handle_end(event);
+        if (lease.item) {
+            if (lease.item->type == WorkItemType::BeginJob) {
+                ok = handle_begin(*lease.item);
+            } else if (lease.item->type == WorkItemType::LightChunk ||
+                       lease.item->type == WorkItemType::DarkChunk) {
+                ok = handle_chunk(*lease.item);
+            } else if (lease.item->type == WorkItemType::EndJob) {
+                ok = handle_end(*lease.item);
+            }
         }
 
         if (!ok) {
-            log_error("Event processing failed. type=" + std::to_string(static_cast<int>(event.type)) +
-                      " job_id=" + std::to_string(event.job_id));
+            const int type_value = lease.item ? static_cast<int>(lease.item->type) : -1;
+            const std::uint64_t job_id = lease.item ? lease.item->job_id : 0;
+            log_error("Event processing failed. type=" + std::to_string(type_value) +
+                      " job_id=" + std::to_string(job_id));
+            work_queue_->ack(lease, false, "save consumer failed");
+            break;
         }
+        work_queue_->ack(lease, true);
     }
 
     if (active_.open) {

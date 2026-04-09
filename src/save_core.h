@@ -11,7 +11,7 @@
 #include <thread>
 #include <vector>
 
-#include "thread_queue.h"
+#include "shared_work_queue.h"
 #include "types.h"
 
 class SaveCore {
@@ -19,12 +19,10 @@ public:
     SaveCore(std::size_t queue_capacity = 200, int enqueue_timeout_ms = 2000);
     ~SaveCore();
 
-    bool start();
+    bool start(SharedWorkQueue* work_queue);
     void stop();
 
-    bool enqueue_event(const SaveEvent& event);
     void set_progress_sink(std::function<void(const SaveProgressEvent&)> progress_sink);
-    void set_frame_stream_sink(std::function<bool(const FrameStreamEvent&)> frame_stream_sink);
 
 private:
     struct ActiveJob {
@@ -52,7 +50,6 @@ private:
         std::vector<std::uint16_t> light_rgb_green;
         std::vector<std::uint16_t> light_rgb_blue;
         std::int64_t light_lines = 0;
-        bool frame_stream_active = false;
         std::int64_t expected_light_frames = 0;
         std::int64_t expected_dark_frames = 0;
         std::string acquisition_date_utc;
@@ -62,9 +59,9 @@ private:
         std::chrono::steady_clock::time_point started_at = std::chrono::steady_clock::time_point{};
     };
 
-    bool handle_begin(const SaveEvent& event);
-    bool handle_chunk(const SaveEvent& event);
-    bool handle_end(const SaveEvent& event);
+    bool handle_begin(const WorkItem& item);
+    bool handle_chunk(const WorkItem& item);
+    bool handle_end(const WorkItem& item);
     void close_open_files();
     void reset_active_job();
 
@@ -72,8 +69,6 @@ private:
     bool write_drop_log(const std::string& path, std::int64_t drop_incidents,
                         std::int64_t dropped_frames, std::int64_t frames_recorded);
     bool write_rgb_png();
-    void emit_frame_stream(const FrameStreamEvent& event);
-    void disable_frame_stream(const std::string& reason);
 
     void log_info(const std::string& message);
     void log_error(const std::string& message);
@@ -81,13 +76,11 @@ private:
 
     void worker_loop();
 
-    ThreadQueue<SaveEvent> events_;
-    std::chrono::milliseconds enqueue_timeout_;
     std::thread worker_;
     std::atomic<bool> started_{false};
     ActiveJob active_;
+    SharedWorkQueue* work_queue_ = nullptr;
     std::function<void(const SaveProgressEvent&)> progress_sink_;
-    std::function<bool(const FrameStreamEvent&)> frame_stream_sink_;
 };
 
 #endif

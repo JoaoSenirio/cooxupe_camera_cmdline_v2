@@ -1,5 +1,6 @@
 #include "capture_core.h"
 
+#include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <ctime>
@@ -31,6 +32,8 @@ constexpr int kAppInvalidFrameSize = -30002;
 constexpr int kAppSnapshotError = -30003;
 constexpr auto kMinRestartDelay = std::chrono::milliseconds(250);
 constexpr double kFloatReadbackTolerance = 1e-6;
+constexpr std::int64_t kChunkTargetFrames = 256;
+constexpr std::size_t kChunkMaxBytes = 512U * 1024U * 1024U;
 
 std::string MakeTimestamp() {
     const auto now = std::chrono::system_clock::now();
@@ -264,6 +267,26 @@ bool NearlyEqual(double lhs, double rhs) {
     return std::fabs(lhs - rhs) <= kFloatReadbackTolerance;
 }
 
+std::size_t DetermineChunkFrameTarget(std::int64_t frame_size_bytes) {
+    if (frame_size_bytes <= 0) {
+        return static_cast<std::size_t>(kChunkTargetFrames);
+    }
+
+    const std::size_t frame_bytes = static_cast<std::size_t>(frame_size_bytes);
+    if (frame_bytes == 0) {
+        return static_cast<std::size_t>(kChunkTargetFrames);
+    }
+
+    const std::size_t target_bytes =
+        static_cast<std::size_t>(kChunkTargetFrames) * frame_bytes;
+    if (target_bytes <= kChunkMaxBytes) {
+        return static_cast<std::size_t>(kChunkTargetFrames);
+    }
+
+    const std::size_t reduced = kChunkMaxBytes / frame_bytes;
+    return std::max<std::size_t>(16, reduced);
+}
+
 void LogReadoutTimeIfAvailable(ISpecSensorApi* api,
                                const std::function<void(const std::string&)>& log_info) {
     if (api == nullptr) {
@@ -306,8 +329,8 @@ CaptureCore::~CaptureCore() {
     Shutdown();
 }
 
-void CaptureCore::set_save_sink(std::function<bool(const SaveEvent&)> save_sink) {
-    save_sink_ = save_sink;
+void CaptureCore::set_work_sink(std::function<bool(WorkItem)> work_sink) {
+    work_sink_ = work_sink;
 }
 
 void CaptureCore::set_progress_sink(std::function<void(const CaptureProgressEvent&)> progress_sink) {
@@ -382,8 +405,8 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
 
     LogInfo("Frame buffer allocated: " + std::to_string(snapshot.frame_size_bytes) + " bytes");
 
-    const bool has_save_sink = static_cast<bool>(save_sink_);
-    const std::uint64_t job_id = has_save_sink ? next_job_id_++ : 0;
+    const bool has_work_sink = static_cast<bool>(work_sink_);
+    const std::uint64_t job_id = has_work_sink ? next_job_id_++ : 0;
     bool begin_sent = false;
     const double effective_frame_rate_hz =
         snapshot.frame_rate_hz > 0.0 ? snapshot.frame_rate_hz : config_.frame_rate_hz;
@@ -430,9 +453,9 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         progress_sink_(event);
     };
 
-    if (has_save_sink) {
-        SaveEvent begin;
-        begin.type = SaveEventType::BeginJob;
+    if (has_work_sink) {
+        WorkItem begin;
+        begin.type = WorkItemType::BeginJob;
         begin.job_id = job_id;
         begin.begin.sample_name = job.sample_name;
         begin.begin.camera_name = config_.camera_name;
@@ -447,7 +470,7 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         begin.begin.acquisition_date_utc = acquisition_date_utc;
         begin.begin.light_start_time_utc = MakeUtcTime();
 
-        if (!EmitSaveEvent(begin, &local_summary)) {
+        if (!EmitWorkItem(std::move(begin), &local_summary)) {
             DisposeFrameBuffer(frame_buffer);
             if (summary != nullptr) {
                 *summary = local_summary;
@@ -464,9 +487,11 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         }
     };
 
+    const std::size_t chunk_target_frames = DetermineChunkFrameTarget(snapshot.frame_size_bytes);
+    const std::size_t chunk_target_bytes =
+        static_cast<std::size_t>(snapshot.frame_size_bytes) * chunk_target_frames;
     std::vector<std::uint8_t> chunk_bytes;
-    chunk_bytes.reserve(static_cast<std::size_t>(snapshot.frame_size_bytes) *
-                        static_cast<std::size_t>(config_.save_block_frames));
+    chunk_bytes.reserve(chunk_target_bytes);
     std::int64_t chunk_frame_count = 0;
     std::int64_t chunk_first_frame = 0;
     std::int64_t chunk_last_frame = 0;
@@ -522,32 +547,35 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         };
     };
 
-    auto flush_chunk = [&](SaveEventType type) -> bool {
+    auto flush_chunk = [&](WorkItemType type) -> bool {
         if (chunk_frame_count <= 0) {
             return true;
         }
 
-        if (!has_save_sink) {
+        if (!has_work_sink) {
             chunk_bytes.clear();
+            chunk_bytes.reserve(chunk_target_bytes);
             chunk_frame_count = 0;
             chunk_first_frame = 0;
             chunk_last_frame = 0;
             return true;
         }
 
-        SaveEvent chunk_event;
+        WorkItem chunk_event;
         chunk_event.type = type;
         chunk_event.job_id = job_id;
         chunk_event.chunk.frame_count = chunk_frame_count;
         chunk_event.chunk.first_frame_number = chunk_first_frame;
         chunk_event.chunk.last_frame_number = chunk_last_frame;
-        chunk_event.chunk.bytes.swap(chunk_bytes);
+        chunk_event.chunk.bytes =
+            std::make_shared<const std::vector<std::uint8_t>>(std::move(chunk_bytes));
 
-        if (!EmitSaveEvent(chunk_event, &local_summary)) {
+        if (!EmitWorkItem(std::move(chunk_event), &local_summary)) {
             return false;
         }
 
-        chunk_bytes.clear();
+        chunk_bytes = std::vector<std::uint8_t>();
+        chunk_bytes.reserve(chunk_target_bytes);
         chunk_frame_count = 0;
         chunk_first_frame = 0;
         chunk_last_frame = 0;
@@ -629,8 +657,8 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
             const std::uint8_t* frame_ptr = static_cast<std::uint8_t*>(frame_buffer);
             chunk_bytes.insert(chunk_bytes.end(), frame_ptr, frame_ptr + frame_size);
 
-            if (chunk_frame_count >= config_.save_block_frames) {
-                if (!flush_chunk(SaveEventType::LightChunk)) {
+            if (static_cast<std::size_t>(chunk_frame_count) >= chunk_target_frames) {
+                if (!flush_chunk(WorkItemType::LightChunk)) {
                     error = kAppSaveQueueError;
                     set_error(error, "Save queue timeout while pushing LIGHT chunk");
                     break;
@@ -655,7 +683,7 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
     }
 
     if (chunk_frame_count > 0 && error != kAppSaveQueueError) {
-        if (!flush_chunk(SaveEventType::LightChunk)) {
+        if (!flush_chunk(WorkItemType::LightChunk)) {
             if (error == 0) {
                 error = kAppSaveQueueError;
             }
@@ -741,8 +769,8 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
             const std::uint8_t* frame_ptr = static_cast<std::uint8_t*>(frame_buffer);
             chunk_bytes.insert(chunk_bytes.end(), frame_ptr, frame_ptr + frame_size);
 
-            if (chunk_frame_count >= config_.save_block_frames) {
-                if (!flush_chunk(SaveEventType::DarkChunk)) {
+            if (static_cast<std::size_t>(chunk_frame_count) >= chunk_target_frames) {
+                if (!flush_chunk(WorkItemType::DarkChunk)) {
                     error = kAppSaveQueueError;
                     set_error(error, "Save queue timeout while pushing DARK chunk");
                     break;
@@ -767,7 +795,7 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
     }
 
     if (chunk_frame_count > 0 && error != kAppSaveQueueError) {
-        if (!flush_chunk(SaveEventType::DarkChunk)) {
+        if (!flush_chunk(WorkItemType::DarkChunk)) {
             if (error == 0) {
                 error = kAppSaveQueueError;
             }
@@ -798,9 +826,9 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
                   error == 0 ? CapturePhase::Dark : CapturePhase::Light,
                   error == 0 ? dark_phase_started_at : light_phase_started_at);
 
-    if (has_save_sink && begin_sent) {
-        SaveEvent end;
-        end.type = SaveEventType::EndJob;
+    if (has_work_sink && begin_sent) {
+        WorkItem end;
+        end.type = WorkItemType::EndJob;
         end.job_id = job_id;
         end.end.success = local_summary.pass;
         end.end.sdk_error = local_summary.sdk_error;
@@ -817,7 +845,7 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         end.end.dark_start_time_utc = dark_start_time_utc;
         end.end.dark_stop_time_utc = dark_stop_time_utc;
 
-        if (!EmitSaveEvent(end, &local_summary)) {
+        if (!EmitWorkItem(std::move(end), &local_summary)) {
             local_summary.pass = false;
         }
     }
@@ -1153,12 +1181,14 @@ int CaptureCore::DisposeFrameBuffer(void* frame_buffer) {
     return error;
 }
 
-bool CaptureCore::EmitSaveEvent(const SaveEvent& event, AcquisitionSummary* summary) {
-    if (!save_sink_) {
+bool CaptureCore::EmitWorkItem(WorkItem item, AcquisitionSummary* summary) {
+    if (!work_sink_) {
         return true;
     }
 
-    if (save_sink_(event)) {
+    const WorkItemType item_type = item.type;
+    const std::uint64_t item_job_id = item.job_id;
+    if (work_sink_(std::move(item))) {
         return true;
     }
 
@@ -1168,8 +1198,8 @@ bool CaptureCore::EmitSaveEvent(const SaveEvent& event, AcquisitionSummary* summ
     }
 
     LogError("Failed to enqueue save event. type=" +
-             std::to_string(static_cast<int>(event.type)) +
-             " job_id=" + std::to_string(event.job_id));
+             std::to_string(static_cast<int>(item_type)) +
+             " job_id=" + std::to_string(item_job_id));
     return false;
 }
 

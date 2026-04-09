@@ -20,6 +20,7 @@
 #include "pipe_core.h"
 #include "runtime_lifecycle.h"
 #include "save_core.h"
+#include "shared_work_queue.h"
 #include "specsensor_api.h"
 #include "ui_engine.h"
 #include "workflow_ui_model.h"
@@ -158,6 +159,15 @@ int RunApplication(const std::vector<std::string>& args) {
         return 1;
     }
 
+    const std::uint8_t consumer_mask =
+        config.matlab_stream_enabled
+            ? static_cast<std::uint8_t>(SharedWorkQueue::kConsumerSaveMask |
+                                        SharedWorkQueue::kConsumerStreamMask)
+            : SharedWorkQueue::kConsumerSaveMask;
+    const std::size_t shared_queue_capacity =
+        config.matlab_stream_enabled ? 3U : static_cast<std::size_t>(config.save_queue_capacity);
+    SharedWorkQueue work_queue(shared_queue_capacity, consumer_mask);
+
     SaveCore save_core(static_cast<std::size_t>(config.save_queue_capacity),
                        config.save_queue_push_timeout_ms);
     FrameStreamCore frame_stream_core(static_cast<std::size_t>(config.matlab_stream_queue_capacity));
@@ -171,7 +181,7 @@ int RunApplication(const std::vector<std::string>& args) {
         work_cv.notify_all();
     });
 
-    if (!runtime.background_workers_may_start() || !save_core.start()) {
+    if (!runtime.background_workers_may_start() || !save_core.start(&work_queue)) {
         capture_core.LogError("Failed to start SaveCore");
         ui_engine.stop();
         capture_core.Shutdown();
@@ -180,7 +190,8 @@ int RunApplication(const std::vector<std::string>& args) {
 
     bool frame_stream_running = false;
     if (config.matlab_stream_enabled) {
-        frame_stream_running = frame_stream_core.start(config.matlab_stream_host,
+        frame_stream_running = frame_stream_core.start(&work_queue,
+                                                       config.matlab_stream_host,
                                                        config.matlab_stream_port,
                                                        config.matlab_stream_connect_timeout_ms,
                                                        config.matlab_stream_send_timeout_ms);
@@ -189,18 +200,18 @@ int RunApplication(const std::vector<std::string>& args) {
                                  config.matlab_stream_host + ":" +
                                  std::to_string(config.matlab_stream_port));
         } else {
-            capture_core.LogError("Failed to start Matlab frame stream worker; continuing without stream");
+            capture_core.LogError("Failed to start mandatory Matlab frame stream worker");
+            work_queue.close();
+            save_core.stop();
+            ui_engine.stop();
+            capture_core.Shutdown();
+            return 1;
         }
     }
 
-    if (frame_stream_running) {
-        save_core.set_frame_stream_sink([&](const FrameStreamEvent& event) {
-            return frame_stream_core.enqueue_event(event);
-        });
-    }
-
-    capture_core.set_save_sink([&](const SaveEvent& event) {
-        return save_core.enqueue_event(event);
+    capture_core.set_work_sink([&](WorkItem item) {
+        return work_queue.publish(std::move(item),
+                                  std::chrono::milliseconds(config.save_queue_push_timeout_ms));
     });
 
     capture_core.set_progress_sink([&](const CaptureProgressEvent& event) {
@@ -355,7 +366,9 @@ int RunApplication(const std::vector<std::string>& args) {
 
     if (!pipe_started) {
         capture_core.LogError("Failed to start pipe server on " + config.pipe_name);
+        work_queue.close();
         save_core.stop();
+        frame_stream_core.stop();
         ui_engine.stop();
         capture_core.Shutdown();
         return 1;
@@ -439,6 +452,7 @@ int RunApplication(const std::vector<std::string>& args) {
 
     pipe_core.stop();
     capture_core.LogInfo("Pipe server stopped");
+    work_queue.close();
     save_core.stop();
     capture_core.LogInfo("SaveCore stopped");
     frame_stream_core.stop();

@@ -1,3 +1,5 @@
+#include <cmath>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -12,76 +14,136 @@ std::uint16_t ReadU16Le(const std::vector<std::uint8_t>& bytes, std::size_t offs
            (static_cast<std::uint16_t>(bytes[offset + 1]) << 8);
 }
 
-int TestSerializeLightRgbBlock() {
-    FrameStreamEvent event;
-    event.type = FrameStreamEventType::LightRgbBlock;
-    event.job_id = 77;
-    event.light_rgb_block.line_count = 2;
-    event.light_rgb_block.line_index_start = 5;
-    event.light_rgb_block.first_frame_number = 1234;
-    event.light_rgb_block.last_frame_number = 1235;
-    event.light_rgb_block.image_width = 2;
-    event.light_rgb_block.rgb_pixels = {
-        10, 20, 30,
-        11, 21, 31,
-        12, 22, 32,
-        13, 23, 33,
-    };
+std::uint32_t ReadU32Le(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
+}
 
-    std::vector<std::uint8_t> bytes;
+double ReadF64Le(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    double value = 0.0;
+    std::memcpy(&value, bytes.data() + static_cast<long>(offset), sizeof(double));
+    return value;
+}
+
+WorkItem MakeBeginItem() {
+    WorkItem item;
+    item.type = WorkItemType::BeginJob;
+    item.job_id = 77;
+    item.begin.expected_light_frames = 21000;
+    item.begin.expected_dark_frames = 50;
+    item.begin.rgb_wavelength_nm[0] = 610;
+    item.begin.rgb_wavelength_nm[1] = 534;
+    item.begin.rgb_wavelength_nm[2] = 470;
+    item.begin.sensor.image_width = 4;
+    item.begin.sensor.image_height = 3;
+    item.begin.sensor.byte_depth = 2;
+    item.begin.sensor.frame_size_bytes = 24;
+    item.begin.sensor.wavelengths_nm = {610.0, 534.0, 470.0};
+    return item;
+}
+
+int TestSerializeBeginPayload() {
+    WorkItem item = MakeBeginItem();
+
+    FrameStreamProtocol::SerializedMessage message;
     std::string error;
-    TEST_ASSERT(FrameStreamProtocol::SerializeEvent(event, 9, &bytes, &error),
-                "LightRgbBlock serialization should succeed");
+    TEST_ASSERT(FrameStreamProtocol::SerializeWorkItem(item, &message, &error),
+                "Begin serialization should succeed");
+    TEST_ASSERT(message.message_type == FrameStreamProtocol::MessageType::Begin,
+                "message type must be Begin");
+    TEST_ASSERT(message.external_payload == nullptr,
+                "Begin should not use an external payload");
 
     FrameStreamProtocol::Header header;
-    TEST_ASSERT(FrameStreamProtocol::ParseHeader(bytes, &header, &error),
-                "serialized bytes should contain a valid header");
+    TEST_ASSERT(FrameStreamProtocol::ParseHeader(message.header, &header, &error),
+                "serialized header should parse");
     TEST_ASSERT(header.magic[0] == 'S' && header.magic[1] == 'S' &&
                     header.magic[2] == 'F' && header.magic[3] == 'R',
                 "header magic must be SSFR");
-    TEST_ASSERT(header.version == FrameStreamProtocol::kVersion, "header version must match protocol");
-    TEST_ASSERT(header.header_bytes == FrameStreamProtocol::kHeaderBytes, "header size must be fixed");
+    TEST_ASSERT(header.version == FrameStreamProtocol::kVersion,
+                "header version must match protocol");
     TEST_ASSERT(header.message_type ==
-                    static_cast<std::uint32_t>(FrameStreamProtocol::MessageType::LightRgbBlock),
-                "message type must match LightRgbBlock");
-    TEST_ASSERT(header.job_id == 77, "job_id must be preserved");
-    TEST_ASSERT(header.sequence == 9, "sequence must be preserved");
-    TEST_ASSERT(header.payload_length == event.light_rgb_block.rgb_pixels.size() * sizeof(std::uint16_t),
-                "payload length must encode every RGB uint16 sample");
+                    static_cast<std::uint16_t>(FrameStreamProtocol::MessageType::Begin),
+                "header must encode Begin");
+    TEST_ASSERT(header.payload_length == message.inline_payload.size(),
+                "header payload length must match inline payload");
 
-    const std::string metadata(bytes.begin() + static_cast<long>(FrameStreamProtocol::kHeaderBytes),
-                               bytes.begin() + static_cast<long>(FrameStreamProtocol::kHeaderBytes +
-                                                                header.metadata_length));
-    TEST_ASSERT(StringContains(metadata, "\"line_count\":2"),
-                "metadata must include line_count");
-    TEST_ASSERT(StringContains(metadata, "\"line_index_start\":5"),
-                "metadata must include line_index_start");
-    TEST_ASSERT(StringContains(metadata, "\"sample_format\":\"uint16_le\""),
-                "metadata must declare the sample format");
-
-    const std::size_t payload_offset =
-        FrameStreamProtocol::kHeaderBytes + static_cast<std::size_t>(header.metadata_length);
-    TEST_ASSERT(ReadU16Le(bytes, payload_offset) == 10, "payload must preserve the first R sample");
-    TEST_ASSERT(ReadU16Le(bytes, payload_offset + 2) == 20, "payload must preserve the first G sample");
-    TEST_ASSERT(ReadU16Le(bytes, payload_offset + 4) == 30, "payload must preserve the first B sample");
-    TEST_ASSERT(ReadU16Le(bytes, payload_offset + 6) == 11, "payload must stay interleaved by pixel");
+    TEST_ASSERT(ReadU32Le(message.inline_payload, 0) == 4, "width must be serialized");
+    TEST_ASSERT(ReadU32Le(message.inline_payload, 4) == 3, "band_count must be serialized");
+    TEST_ASSERT(ReadU32Le(message.inline_payload, 8) == 2, "byte_depth must be serialized");
+    TEST_ASSERT(ReadU32Le(message.inline_payload, 12) == 24, "frame size must be serialized");
+    TEST_ASSERT(ReadU32Le(message.inline_payload, 16) == 21000,
+                "expected light frames must be serialized");
+    TEST_ASSERT(ReadU32Le(message.inline_payload, 20) == 50,
+                "expected dark frames must be serialized");
+    TEST_ASSERT(ReadU32Le(message.inline_payload, 24) == 610 &&
+                    ReadU32Le(message.inline_payload, 28) == 534 &&
+                    ReadU32Le(message.inline_payload, 32) == 470,
+                "RGB target wavelengths must be serialized");
+    TEST_ASSERT(std::fabs(ReadF64Le(message.inline_payload, 36) - 610.0) < 1e-9,
+                "first wavelength must be serialized");
+    TEST_ASSERT(std::fabs(ReadF64Le(message.inline_payload, 44) - 534.0) < 1e-9,
+                "second wavelength must be serialized");
+    TEST_ASSERT(std::fabs(ReadF64Le(message.inline_payload, 52) - 470.0) < 1e-9,
+                "third wavelength must be serialized");
     return 0;
 }
 
-int TestSerializeRejectsPayloadSizeMismatch() {
-    FrameStreamEvent event;
-    event.type = FrameStreamEventType::LightRgbBlock;
-    event.job_id = 1;
-    event.light_rgb_block.line_count = 1;
-    event.light_rgb_block.image_width = 2;
-    event.light_rgb_block.rgb_pixels = {1, 2, 3};
+int TestSerializeLightChunkUsesExternalPayload() {
+    WorkItem item;
+    item.type = WorkItemType::LightChunk;
+    item.job_id = 12;
+    item.chunk.frame_count = 2;
+    auto bytes = std::make_shared<std::vector<std::uint8_t>>();
+    bytes->push_back(10);
+    bytes->push_back(20);
+    bytes->push_back(30);
+    bytes->push_back(40);
+    item.chunk.bytes = bytes;
 
-    std::vector<std::uint8_t> bytes;
+    FrameStreamProtocol::SerializedMessage message;
     std::string error;
-    TEST_ASSERT(!FrameStreamProtocol::SerializeEvent(event, 1, &bytes, &error),
-                "serialization must fail when payload size does not match geometry");
-    TEST_ASSERT(StringContains(error, "size mismatch"),
-                "serialization error must explain the mismatch");
+    TEST_ASSERT(FrameStreamProtocol::SerializeWorkItem(item, &message, &error),
+                "Light chunk serialization should succeed");
+    TEST_ASSERT(message.message_type == FrameStreamProtocol::MessageType::LightBlock,
+                "message type must be LightBlock");
+    TEST_ASSERT(message.inline_payload.empty(),
+                "chunk messages should not duplicate payload inline");
+    TEST_ASSERT(message.external_payload == bytes.get(),
+                "chunk payload must be reused by pointer");
+
+    FrameStreamProtocol::Header header;
+    TEST_ASSERT(FrameStreamProtocol::ParseHeader(message.header, &header, &error),
+                "chunk header should parse");
+    TEST_ASSERT(header.message_type ==
+                    static_cast<std::uint16_t>(FrameStreamProtocol::MessageType::LightBlock),
+                "header must encode LightBlock");
+    TEST_ASSERT(header.payload_length == bytes->size(),
+                "header payload length must match external payload size");
+    return 0;
+}
+
+int TestAckRoundTrip() {
+    std::vector<std::uint8_t> bytes;
+    FrameStreamProtocol::BuildAck(true, &bytes);
+    TEST_ASSERT(bytes.size() == FrameStreamProtocol::kAckBytes,
+                "ack must have fixed size");
+
+    FrameStreamProtocol::Ack ack;
+    std::string error;
+    TEST_ASSERT(FrameStreamProtocol::ParseAck(bytes, &ack, &error),
+                "ack should parse");
+    TEST_ASSERT(ack.magic[0] == 'S' && ack.magic[1] == 'S' &&
+                    ack.magic[2] == 'F' && ack.magic[3] == 'A',
+                "ack magic must be SSFA");
+    TEST_ASSERT(ack.status == 0, "success ack must have status zero");
+
+    FrameStreamProtocol::BuildAck(false, &bytes);
+    TEST_ASSERT(FrameStreamProtocol::ParseAck(bytes, &ack, &error),
+                "failure ack should also parse");
+    TEST_ASSERT(ack.status == 1, "failure ack must have status one");
     return 0;
 }
 
@@ -89,7 +151,8 @@ int TestSerializeRejectsPayloadSizeMismatch() {
 
 int main() {
     return RunSuite("test_frame_stream_protocol", {
-        {"SerializeLightRgbBlock", TestSerializeLightRgbBlock},
-        {"SerializeRejectsPayloadSizeMismatch", TestSerializeRejectsPayloadSizeMismatch},
+        {"SerializeBeginPayload", TestSerializeBeginPayload},
+        {"SerializeLightChunkUsesExternalPayload", TestSerializeLightChunkUsesExternalPayload},
+        {"AckRoundTrip", TestAckRoundTrip},
     });
 }

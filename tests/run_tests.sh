@@ -32,6 +32,7 @@ SUITES=(
   test_frame_stream_protocol
   test_runtime_lifecycle
   test_save_core_stream
+  test_shared_work_queue
   test_test_support
   test_workflow_ui_model
 )
