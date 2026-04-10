@@ -4,6 +4,9 @@ classdef SpecSensorRgbStreamServer < handle
         Port (1, 1) double = 55001
         Server
         RxBuffer uint8 = uint8([])
+        PendingHeader struct = struct()
+        PendingMessageBytesExpected (1, 1) double = 0
+        PendingMessageBytesReceived (1, 1) double = 0
         Job struct = struct()
         HeaderBytes (1, 1) double = 12
         AckBytes (1, 1) double = 8
@@ -16,15 +19,23 @@ classdef SpecSensorRgbStreamServer < handle
         StoreLightCube (1, 1) logical = true
         StoreDarkCube (1, 1) logical = true
         CallbackArmed (1, 1) logical = false
+        HandleDataActive (1, 1) logical = false
+        PreviewWindowFrames (1, 1) double = 3072
+        PreviewRenderIntervalMs (1, 1) double = 500
+        PreviewFrameCount (1, 1) double = 0
+        PreviewWriteIndex (1, 1) double = 1
+        PreviewChannelScaleMax (1, 3) double = [1 1 1]
+        LastPreviewRenderAt (1, 1) double = NaN
         LightCubeRaw
         DarkCubeRaw
-        RgbPreviewRaw
+        RgbPreviewDisplay uint8 = uint8([])
         RgbTargetWavelengthNm (1, 3) double = [0 0 0]
         ResolvedRgbBandIndices (1, 3) double = [1 1 1]
         ResolvedRgbBandWavelengthNm (1, 3) double = [0 0 0]
         FigureHandle
         AxesHandle
         ImageHandle
+        SecondaryImageHandle
     end
 
     methods
@@ -77,75 +88,131 @@ classdef SpecSensorRgbStreamServer < handle
         end
 
         function handleData(obj, src, ~)
-            if src.NumBytesAvailable <= 0
+            if obj.HandleDataActive
+                obj.logf("handleData reentry ignored available=%d buffered=%d/%d", ...
+                    double(src.NumBytesAvailable), obj.PendingMessageBytesReceived, ...
+                    obj.PendingMessageBytesExpected);
                 return;
             end
 
-            obj.logf("handleData enter available=%d rx_buffer_before=%d", ...
-                double(src.NumBytesAvailable), numel(obj.RxBuffer));
-            incoming = read(src, src.NumBytesAvailable, "uint8");
-            obj.RxBuffer = [obj.RxBuffer; incoming(:)]; %#ok<AGROW>
-            obj.logf("handleData read bytes=%d rx_buffer_after=%d first_bytes=%s", ...
-                numel(incoming), numel(obj.RxBuffer), obj.bytesToHex(incoming));
-
+            obj.HandleDataActive = true;
+            handleDataCleanup = onCleanup(@() obj.finishHandleData()); %#ok<NASGU>
             while true
-                if numel(obj.RxBuffer) < obj.HeaderBytes
-                    obj.logf("handleData waiting header rx_buffer=%d header_bytes=%d", ...
-                        numel(obj.RxBuffer), obj.HeaderBytes);
+                if src.NumBytesAvailable <= 0
                     return;
                 end
 
-                parseStarted = tic;
-                try
-                    header = obj.parseHeader(obj.RxBuffer(1:obj.HeaderBytes));
-                catch err
-                    obj.logf("parseHeader failed rx_buffer=%d header_hex=%s error=%s", ...
-                        numel(obj.RxBuffer), obj.bytesToHex(obj.RxBuffer(1:obj.HeaderBytes)), ...
-                        obj.formatError(err));
-                    rethrow(err);
-                end
-                parseElapsedMs = toc(parseStarted) * 1000.0;
-                totalBytes = obj.HeaderBytes + double(header.payload_length);
-                obj.logf("parsed header type=%d(%s) version=%d payload_length=%d total_bytes=%d rx_buffer=%d parse_ms=%.3f header_hex=%s", ...
-                    header.message_type, obj.messageTypeName(header.message_type), ...
-                    header.version, header.payload_length, totalBytes, numel(obj.RxBuffer), ...
-                    parseElapsedMs, obj.bytesToHex(obj.RxBuffer(1:obj.HeaderBytes)));
-                if numel(obj.RxBuffer) < totalBytes
-                    obj.logf("handleData waiting payload type=%d(%s) need=%d have=%d", ...
+                obj.logf("handleData enter available=%d buffered=%d/%d", ...
+                    double(src.NumBytesAvailable), obj.PendingMessageBytesReceived, ...
+                    obj.PendingMessageBytesExpected);
+                incoming = read(src, src.NumBytesAvailable, "uint8");
+                obj.logf("handleData read bytes=%d first_bytes=%s", ...
+                    numel(incoming), obj.bytesToHex(incoming));
+
+                incoming = incoming(:);
+                incomingCount = numel(incoming);
+                incomingOffset = 1;
+                while incomingOffset <= incomingCount
+                    if obj.PendingMessageBytesExpected <= 0
+                        headerBytesNeeded = obj.HeaderBytes - numel(obj.RxBuffer);
+                        headerBytesToCopy = min(headerBytesNeeded, incomingCount - incomingOffset + 1);
+                        obj.RxBuffer = [obj.RxBuffer; ...
+                            incoming(incomingOffset:incomingOffset + headerBytesToCopy - 1)]; %#ok<AGROW>
+                        incomingOffset = incomingOffset + headerBytesToCopy;
+
+                        if numel(obj.RxBuffer) < obj.HeaderBytes
+                            obj.logf("handleData waiting header buffered=%d header_bytes=%d", ...
+                                numel(obj.RxBuffer), obj.HeaderBytes);
+                            break;
+                        end
+
+                        parseStarted = tic;
+                        try
+                            header = obj.parseHeader(obj.RxBuffer(1:obj.HeaderBytes));
+                        catch err
+                            obj.logf("parseHeader failed header_hex=%s error=%s", ...
+                                obj.bytesToHex(obj.RxBuffer(1:obj.HeaderBytes)), ...
+                                obj.formatError(err));
+                            rethrow(err);
+                        end
+
+                        parseElapsedMs = toc(parseStarted) * 1000.0;
+                        totalBytes = obj.HeaderBytes + double(header.payload_length);
+                        messageBuffer = zeros(totalBytes, 1, "uint8");
+                        messageBuffer(1:obj.HeaderBytes) = obj.RxBuffer(1:obj.HeaderBytes);
+                        obj.RxBuffer = messageBuffer;
+                        obj.PendingHeader = header;
+                        obj.PendingMessageBytesExpected = totalBytes;
+                        obj.PendingMessageBytesReceived = obj.HeaderBytes;
+                        obj.logf("parsed header type=%d(%s) version=%d payload_length=%d total_bytes=%d buffered=%d parse_ms=%.3f header_hex=%s", ...
+                            header.message_type, obj.messageTypeName(header.message_type), ...
+                            header.version, header.payload_length, totalBytes, ...
+                            obj.PendingMessageBytesReceived, parseElapsedMs, ...
+                            obj.bytesToHex(messageBuffer(1:obj.HeaderBytes)));
+                    end
+
+                    payloadBytesRemaining = obj.PendingMessageBytesExpected - obj.PendingMessageBytesReceived;
+                    payloadBytesToCopy = min(payloadBytesRemaining, incomingCount - incomingOffset + 1);
+                    if payloadBytesToCopy > 0
+                        writeStart = obj.PendingMessageBytesReceived + 1;
+                        writeEnd = writeStart + payloadBytesToCopy - 1;
+                        obj.RxBuffer(writeStart:writeEnd) = ...
+                            incoming(incomingOffset:incomingOffset + payloadBytesToCopy - 1);
+                        obj.PendingMessageBytesReceived = obj.PendingMessageBytesReceived + payloadBytesToCopy;
+                        incomingOffset = incomingOffset + payloadBytesToCopy;
+                        obj.logf("handleData buffered payload copied=%d buffered=%d/%d", ...
+                            payloadBytesToCopy, obj.PendingMessageBytesReceived, ...
+                            obj.PendingMessageBytesExpected);
+                    end
+
+                    if obj.PendingMessageBytesReceived < obj.PendingMessageBytesExpected
+                        header = obj.PendingHeader;
+                        obj.logf("handleData waiting payload type=%d(%s) need=%d have=%d", ...
+                            header.message_type, obj.messageTypeName(header.message_type), ...
+                            obj.PendingMessageBytesExpected, obj.PendingMessageBytesReceived);
+                        break;
+                    end
+
+                    header = obj.PendingHeader;
+                    payloadBytes = obj.RxBuffer(obj.HeaderBytes + 1 : obj.PendingMessageBytesExpected);
+                    obj.logf("dispatch start type=%d(%s) payload_bytes=%d payload_head=%s", ...
                         header.message_type, obj.messageTypeName(header.message_type), ...
-                        totalBytes, numel(obj.RxBuffer));
+                        numel(payloadBytes), obj.bytesToHex(payloadBytes));
+                    obj.clearPendingMessageState();
+
+                    ackSuccess = true;
+                    dispatchElapsedMs = 0.0;
+                    try
+                        dispatchStarted = tic;
+                        obj.dispatchMessage(header, payloadBytes);
+                        dispatchElapsedMs = toc(dispatchStarted) * 1000.0;
+                        obj.logf("dispatch ok type=%d(%s) elapsed_ms=%.3f", ...
+                            header.message_type, obj.messageTypeName(header.message_type), dispatchElapsedMs);
+                    catch err
+                        ackSuccess = false;
+                        dispatchElapsedMs = toc(dispatchStarted) * 1000.0;
+                        obj.logf("Error processing message_type=%d(%s) elapsed_ms=%.3f error=%s", ...
+                            header.message_type, obj.messageTypeName(header.message_type), ...
+                            dispatchElapsedMs, obj.formatError(err));
+                    end
+
+                    try
+                        obj.writeAck(src, ackSuccess, header.message_type);
+                    catch err
+                        obj.logf("writeAck failed type=%d(%s) error=%s", ...
+                            header.message_type, obj.messageTypeName(header.message_type), ...
+                            obj.formatError(err));
+                        rethrow(err);
+                    end
+                end
+
+                if src.NumBytesAvailable <= 0
                     return;
                 end
 
-                payloadBytes = obj.RxBuffer(obj.HeaderBytes + 1 : totalBytes);
-                obj.RxBuffer = obj.RxBuffer(totalBytes + 1:end);
-                obj.logf("dispatch start type=%d(%s) payload_bytes=%d payload_head=%s rx_buffer_remaining=%d", ...
-                    header.message_type, obj.messageTypeName(header.message_type), ...
-                    numel(payloadBytes), obj.bytesToHex(payloadBytes), numel(obj.RxBuffer));
-
-                ackSuccess = true;
-                dispatchElapsedMs = 0.0;
-                try
-                    dispatchStarted = tic;
-                    obj.dispatchMessage(header, payloadBytes);
-                    dispatchElapsedMs = toc(dispatchStarted) * 1000.0;
-                    obj.logf("dispatch ok type=%d(%s) elapsed_ms=%.3f", ...
-                        header.message_type, obj.messageTypeName(header.message_type), dispatchElapsedMs);
-                catch err
-                    ackSuccess = false;
-                    dispatchElapsedMs = toc(dispatchStarted) * 1000.0;
-                    obj.logf("Error processing message_type=%d(%s) elapsed_ms=%.3f error=%s", ...
-                        header.message_type, obj.messageTypeName(header.message_type), ...
-                        dispatchElapsedMs, obj.formatError(err));
-                end
-                try
-                    obj.writeAck(src, ackSuccess, header.message_type);
-                catch err
-                    obj.logf("writeAck failed type=%d(%s) error=%s", ...
-                        header.message_type, obj.messageTypeName(header.message_type), ...
-                        obj.formatError(err));
-                    rethrow(err);
-                end
+                obj.logf("handleData drain continue available=%d buffered=%d/%d", ...
+                    double(src.NumBytesAvailable), obj.PendingMessageBytesReceived, ...
+                    obj.PendingMessageBytesExpected);
             end
         end
 
@@ -253,15 +320,28 @@ classdef SpecSensorRgbStreamServer < handle
                     darkCubeBytes / (1024 ^ 3), obj.MaxCubeBytes / (1024 ^ 3));
             end
 
-            obj.RgbPreviewRaw = zeros(0, imageWidth, 3, obj.PayloadClass);
+            previewCapacity = max(1, min(obj.PreviewWindowFrames, max(1, expectedLightFrames)));
+            obj.RgbPreviewDisplay = zeros(previewCapacity, imageWidth, 3, "uint8");
+            obj.PreviewFrameCount = 0;
+            obj.PreviewWriteIndex = 1;
+            obj.PreviewChannelScaleMax = [1 1 1];
+            obj.LastPreviewRenderAt = NaN;
 
             obj.ensureFigure(imageWidth);
+            obj.ImageHandle.CData = zeros(1, max(1, imageWidth), 3, "uint8");
+            obj.ImageHandle.XData = [1 max(1, imageWidth)];
+            obj.ImageHandle.YData = [1 1];
+            obj.ImageHandle.Visible = "on";
+            obj.SecondaryImageHandle.Visible = "off";
+            obj.AxesHandle.XLim = [0.5 imageWidth + 0.5];
+            obj.AxesHandle.YLim = [0.5 1.5];
             obj.updateFigureTitle(sprintf("LIGHT aguardando | RGB alvo=[%d %d %d]nm | bandas=[%.2f %.2f %.2f]nm", ...
                 obj.RgbTargetWavelengthNm(1), obj.RgbTargetWavelengthNm(2), obj.RgbTargetWavelengthNm(3), ...
                 obj.ResolvedRgbBandWavelengthNm(1), obj.ResolvedRgbBandWavelengthNm(2), ...
                 obj.ResolvedRgbBandWavelengthNm(3)));
-            obj.logf("handleBegin finished elapsed_ms=%.3f preview_rows=%d light_store=%d dark_store=%d", ...
-                toc(beginStarted) * 1000.0, size(obj.RgbPreviewRaw, 1), obj.StoreLightCube, obj.StoreDarkCube);
+            obj.logf("handleBegin finished elapsed_ms=%.3f preview_capacity=%d light_store=%d dark_store=%d", ...
+                toc(beginStarted) * 1000.0, size(obj.RgbPreviewDisplay, 1), ...
+                obj.StoreLightCube, obj.StoreDarkCube);
         end
 
         function handleChunk(obj, payloadBytes, isDark)
@@ -303,27 +383,23 @@ classdef SpecSensorRgbStreamServer < handle
                 obj.LightCubeRaw(:, :, startIndex:endIndex) = block;
             end
 
-            previewBlock = zeros(frameCount, obj.Job.image_width, 3, obj.PayloadClass);
-            previewBlock(:, :, 1) = permute(block(:, obj.ResolvedRgbBandIndices(1), :), [3 1 2]);
-            previewBlock(:, :, 2) = permute(block(:, obj.ResolvedRgbBandIndices(2), :), [3 1 2]);
-            previewBlock(:, :, 3) = permute(block(:, obj.ResolvedRgbBandIndices(3), :), [3 1 2]);
-            if isempty(obj.RgbPreviewRaw)
-                obj.RgbPreviewRaw = previewBlock;
-            else
-                obj.RgbPreviewRaw = cat(1, obj.RgbPreviewRaw, previewBlock);
-            end
             obj.LightFrameCursor = endIndex;
+            previewBlock = permute(block(:, obj.ResolvedRgbBandIndices, :), [3 1 2]);
+            obj.appendPreviewBlock(previewBlock);
 
             renderStarted = tic;
-            obj.renderCurrentImage();
+            rendered = obj.renderCurrentImage(false);
             renderElapsedMs = toc(renderStarted) * 1000.0;
-            obj.updateFigureTitle(sprintf("LIGHT linhas=%d/%d | RGB=[%.2f %.2f %.2f]nm", ...
-                obj.LightFrameCursor, obj.Job.expected_light_frames, ...
-                obj.ResolvedRgbBandWavelengthNm(1), obj.ResolvedRgbBandWavelengthNm(2), ...
-                obj.ResolvedRgbBandWavelengthNm(3)));
-            obj.logf("handleChunk light stored=%d start_index=%d end_index=%d preview_rows=%d render_ms=%.3f total_ms=%.3f", ...
-                obj.StoreLightCube, startIndex, endIndex, size(obj.RgbPreviewRaw, 1), ...
-                renderElapsedMs, toc(chunkStarted) * 1000.0);
+            if rendered
+                obj.updateFigureTitle(sprintf("LIGHT linhas=%d/%d | janela=%d | RGB=[%.2f %.2f %.2f]nm", ...
+                    obj.LightFrameCursor, obj.Job.expected_light_frames, obj.PreviewFrameCount, ...
+                    obj.ResolvedRgbBandWavelengthNm(1), obj.ResolvedRgbBandWavelengthNm(2), ...
+                    obj.ResolvedRgbBandWavelengthNm(3)));
+            end
+            obj.logf("handleChunk light stored=%d start_index=%d end_index=%d preview_rows=%d rendered=%d render_ms=%.3f scale_max=[%.1f %.1f %.1f] total_ms=%.3f", ...
+                obj.StoreLightCube, startIndex, endIndex, obj.PreviewFrameCount, rendered, ...
+                renderElapsedMs, obj.PreviewChannelScaleMax(1), obj.PreviewChannelScaleMax(2), ...
+                obj.PreviewChannelScaleMax(3), toc(chunkStarted) * 1000.0);
         end
 
         function handleEnd(obj, payloadBytes)
@@ -337,7 +413,7 @@ classdef SpecSensorRgbStreamServer < handle
             lightFrames = double(typecast(uint8(payloadBytes(9:12)), "uint32"));
             darkFrames = double(typecast(uint8(payloadBytes(13:16)), "uint32"));
 
-            obj.renderCurrentImage();
+            obj.renderCurrentImage(true);
             obj.updateFigureTitle(sprintf("fim success=%d sdk=%d light=%d dark=%d", ...
                 successValue, sdkError, lightFrames, darkFrames));
             obj.logf("handleEnd success=%d sdk_error=%d light_frames=%d dark_frames=%d elapsed_ms=%.3f", ...
@@ -361,37 +437,126 @@ classdef SpecSensorRgbStreamServer < handle
             figureStarted = tic;
             obj.FigureHandle = figure("Name", "SpecSensor RGB Stream", "NumberTitle", "off");
             obj.AxesHandle = axes(obj.FigureHandle);
-            initialImage = zeros(1, max(1, imageWidth), 3, "double");
-            obj.ImageHandle = image(obj.AxesHandle, initialImage);
+            hold(obj.AxesHandle, "on");
+            initialImage = zeros(1, max(1, imageWidth), 3, "uint8");
+            obj.ImageHandle = image(obj.AxesHandle, ...
+                "CData", initialImage, ...
+                "XData", [1 max(1, imageWidth)], ...
+                "YData", [1 1], ...
+                "Visible", "on");
+            obj.SecondaryImageHandle = image(obj.AxesHandle, ...
+                "CData", initialImage, ...
+                "XData", [1 max(1, imageWidth)], ...
+                "YData", [1 1], ...
+                "Visible", "off");
+            hold(obj.AxesHandle, "off");
             axis(obj.AxesHandle, "image");
             obj.AxesHandle.YDir = "normal";
             obj.logf("ensureFigure created image_width=%d elapsed_ms=%.3f", ...
                 imageWidth, toc(figureStarted) * 1000.0);
         end
 
-        function renderCurrentImage(obj)
-            if obj.LightFrameCursor <= 0
+        function rendered = renderCurrentImage(obj, forceRender)
+            if nargin < 2
+                forceRender = false;
+            end
+
+            rendered = false;
+            if obj.PreviewFrameCount <= 0 || isempty(obj.RgbPreviewDisplay)
                 return;
             end
 
-            raw = double(obj.RgbPreviewRaw(1:obj.LightFrameCursor, :, :));
-            displayImage = zeros(size(raw, 1), size(raw, 2), 3, "double");
-            for channel = 1:3
-                plane = raw(:, :, channel);
-                low = min(plane, [], "all");
-                high = max(plane, [], "all");
-                if high > low
-                    plane = (plane - low) ./ (high - low);
-                else
-                    plane(:, :) = 0;
+            if ~forceRender && ~isnan(obj.LastPreviewRenderAt)
+                elapsedSinceRenderMs = (now - obj.LastPreviewRenderAt) * 86400000.0;
+                if elapsedSinceRenderMs < obj.PreviewRenderIntervalMs
+                    return;
                 end
-                displayImage(:, :, channel) = plane;
             end
 
-            obj.ensureFigure(size(raw, 2));
-            obj.ImageHandle.CData = displayImage;
+            imageWidth = size(obj.RgbPreviewDisplay, 2);
+            previewRows = obj.PreviewFrameCount;
+            previewCapacity = size(obj.RgbPreviewDisplay, 1);
+
+            obj.ensureFigure(imageWidth);
+            if previewRows < previewCapacity || obj.PreviewWriteIndex == 1
+                obj.ImageHandle.CData = obj.RgbPreviewDisplay(1:previewRows, :, :);
+                obj.ImageHandle.XData = [1 imageWidth];
+                obj.ImageHandle.YData = [1 previewRows];
+                obj.ImageHandle.Visible = "on";
+                obj.SecondaryImageHandle.Visible = "off";
+            else
+                firstRows = previewCapacity - obj.PreviewWriteIndex + 1;
+                secondRows = obj.PreviewWriteIndex - 1;
+
+                obj.ImageHandle.CData = obj.RgbPreviewDisplay(obj.PreviewWriteIndex:end, :, :);
+                obj.ImageHandle.XData = [1 imageWidth];
+                obj.ImageHandle.YData = [1 firstRows];
+                obj.ImageHandle.Visible = "on";
+
+                obj.SecondaryImageHandle.CData = obj.RgbPreviewDisplay(1:secondRows, :, :);
+                obj.SecondaryImageHandle.XData = [1 imageWidth];
+                obj.SecondaryImageHandle.YData = [firstRows + 1 previewRows];
+                obj.SecondaryImageHandle.Visible = "on";
+            end
+
+            obj.AxesHandle.XLim = [0.5 imageWidth + 0.5];
+            obj.AxesHandle.YLim = [0.5 max(1, previewRows) + 0.5];
             axis(obj.AxesHandle, "image");
             drawnow limitrate nocallbacks;
+            obj.LastPreviewRenderAt = now;
+            rendered = true;
+        end
+
+        function appendPreviewBlock(obj, previewBlock)
+            if isempty(previewBlock) || isempty(obj.RgbPreviewDisplay)
+                return;
+            end
+
+            previewCapacity = size(obj.RgbPreviewDisplay, 1);
+            frameCount = size(previewBlock, 1);
+            if frameCount > previewCapacity
+                previewBlock = previewBlock(frameCount - previewCapacity + 1:end, :, :);
+                frameCount = previewCapacity;
+            end
+
+            previewDisplayBlock = obj.convertPreviewBlockToDisplay(previewBlock);
+            firstSpan = min(frameCount, previewCapacity - obj.PreviewWriteIndex + 1);
+            obj.writePreviewRows(obj.PreviewWriteIndex, previewDisplayBlock, 1, firstSpan);
+
+            remaining = frameCount - firstSpan;
+            if remaining > 0
+                obj.writePreviewRows(1, previewDisplayBlock, firstSpan + 1, remaining);
+            end
+
+            obj.PreviewWriteIndex = mod(obj.PreviewWriteIndex + frameCount - 1, previewCapacity) + 1;
+            obj.PreviewFrameCount = min(previewCapacity, obj.PreviewFrameCount + frameCount);
+        end
+
+        function previewDisplayBlock = convertPreviewBlockToDisplay(obj, previewBlock)
+            previewDisplayBlock = zeros(size(previewBlock, 1), size(previewBlock, 2), 3, "uint8");
+            previewDouble = double(previewBlock);
+            for channel = 1:3
+                channelPlane = previewDouble(:, :, channel);
+                channelMax = max(channelPlane, [], "all");
+                if channelMax > obj.PreviewChannelScaleMax(channel)
+                    obj.PreviewChannelScaleMax(channel) = channelMax;
+                end
+
+                scaleMax = max(obj.PreviewChannelScaleMax(channel), 1.0);
+                previewDisplayBlock(:, :, channel) = uint8(min(255.0, ...
+                    channelPlane .* (255.0 / scaleMax)));
+            end
+        end
+
+        function writePreviewRows(obj, destStart, previewDisplayBlock, srcStart, rowCount)
+            if rowCount <= 0
+                return;
+            end
+
+            destEnd = destStart + rowCount - 1;
+            srcEnd = srcStart + rowCount - 1;
+            obj.RgbPreviewDisplay(destStart:destEnd, :, :) = ...
+                previewDisplayBlock(srcStart:srcEnd, :, :);
         end
 
         function updateFigureTitle(obj, textValue)
@@ -408,8 +573,6 @@ classdef SpecSensorRgbStreamServer < handle
             obj.logf("writeAck start type=%d(%s) status=%d bytes=%s", ...
                 messageType, obj.messageTypeName(messageType), uint16(~success), ...
                 obj.bytesToHex(ackBytes));
-            obj.disarmReadCallback();
-            callbackRestore = onCleanup(@() obj.armReadCallback()); %#ok<NASGU>
             write(src, ackBytes, "uint8");
             obj.logf("writeAck done type=%d(%s) status=%d elapsed_ms=%.3f", ...
                 messageType, obj.messageTypeName(messageType), uint16(~success), ...
@@ -427,21 +590,37 @@ classdef SpecSensorRgbStreamServer < handle
         end
 
         function resetJobState(obj)
-            obj.logf("resetJobState begin rx_buffer=%d light_cursor=%d dark_cursor=%d", ...
-                numel(obj.RxBuffer), obj.LightFrameCursor, obj.DarkFrameCursor);
-            obj.RxBuffer = uint8([]);
+            obj.logf("resetJobState begin buffered=%d/%d light_cursor=%d dark_cursor=%d", ...
+                obj.PendingMessageBytesReceived, obj.PendingMessageBytesExpected, ...
+                obj.LightFrameCursor, obj.DarkFrameCursor);
+            obj.clearPendingMessageState();
             obj.Job = struct();
             obj.LightFrameCursor = 0;
             obj.DarkFrameCursor = 0;
             obj.LightCubeRaw = [];
             obj.DarkCubeRaw = [];
-            obj.RgbPreviewRaw = [];
+            obj.RgbPreviewDisplay = uint8([]);
+            obj.PreviewFrameCount = 0;
+            obj.PreviewWriteIndex = 1;
+            obj.PreviewChannelScaleMax = [1 1 1];
+            obj.LastPreviewRenderAt = NaN;
             obj.RgbTargetWavelengthNm = [0 0 0];
             obj.ResolvedRgbBandIndices = [1 1 1];
             obj.ResolvedRgbBandWavelengthNm = [0 0 0];
             obj.StoreLightCube = true;
             obj.StoreDarkCube = true;
             obj.logf("resetJobState done");
+        end
+
+        function clearPendingMessageState(obj)
+            obj.RxBuffer = uint8([]);
+            obj.PendingHeader = struct();
+            obj.PendingMessageBytesExpected = 0;
+            obj.PendingMessageBytesReceived = 0;
+        end
+
+        function finishHandleData(obj)
+            obj.HandleDataActive = false;
         end
 
         function className = classForByteDepth(~, byteDepth)

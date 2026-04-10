@@ -1,5 +1,6 @@
 #include <cmath>
 #include <iostream>
+#include <vector>
 
 #include "capture_core.h"
 #include "fake_specsensor_api.h"
@@ -135,6 +136,48 @@ int TestWorkflowNormalizesSpectralMetadataToEffectiveBandCount() {
     return 0;
 }
 
+int TestWorkflowUsesConfiguredChunkFrameTarget() {
+    AppConfig config = MakeTestConfig("specsensor_cli_test_chunk_target");
+    RemoveLogFileIfExists(config.log_file_path);
+    config.save_block_frames = 7;
+    config.dark_frames = 0;
+
+    FakeSpecSensorApi api;
+    api.wait_delay_us = 1000;
+
+    CaptureCore core(config, &api);
+    TEST_ASSERT(core.Initialize(), "CaptureCore initialize should succeed");
+
+    std::vector<std::int64_t> light_chunk_sizes;
+    core.set_work_sink([&](WorkItem item) {
+        if (item.type == WorkItemType::LightChunk) {
+            light_chunk_sizes.push_back(item.chunk.frame_count);
+        }
+        return true;
+    });
+
+    AcquisitionJob job;
+    job.sample_name = "sample-chunk-target";
+    AcquisitionSummary captured_summary;
+    TEST_ASSERT(core.CaptureSample(job, &captured_summary), "capture sample should succeed");
+    core.Shutdown();
+
+    TEST_ASSERT(!light_chunk_sizes.empty(), "workflow must emit at least one light chunk");
+    bool saw_full_chunk = false;
+    for (std::size_t i = 0; i < light_chunk_sizes.size(); ++i) {
+        TEST_ASSERT(light_chunk_sizes[i] > 0, "chunk frame count must be positive");
+        TEST_ASSERT(light_chunk_sizes[i] <= config.save_block_frames,
+                    "chunk frame count must respect save_block_frames");
+        if (light_chunk_sizes[i] == config.save_block_frames) {
+            saw_full_chunk = true;
+        }
+    }
+
+    TEST_ASSERT(saw_full_chunk, "workflow should emit at least one full-sized configured chunk");
+    TEST_ASSERT(captured_summary.pass, "summary should still pass");
+    return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -145,5 +188,7 @@ int main() {
          TestPhaseFpsLoggingFallsBackWhenSdkMetricIsUnavailable},
         {"WorkflowNormalizesSpectralMetadataToEffectiveBandCount",
          TestWorkflowNormalizesSpectralMetadataToEffectiveBandCount},
+        {"WorkflowUsesConfiguredChunkFrameTarget",
+         TestWorkflowUsesConfiguredChunkFrameTarget},
     });
 }

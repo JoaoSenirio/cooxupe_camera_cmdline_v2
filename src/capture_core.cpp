@@ -32,7 +32,7 @@ constexpr int kAppInvalidFrameSize = -30002;
 constexpr int kAppSnapshotError = -30003;
 constexpr auto kMinRestartDelay = std::chrono::milliseconds(250);
 constexpr double kFloatReadbackTolerance = 1e-6;
-constexpr std::int64_t kChunkTargetFrames = 256;
+constexpr std::size_t kDefaultChunkTargetFrames = 64;
 constexpr std::size_t kChunkMaxBytes = 512U * 1024U * 1024U;
 
 std::vector<double> RebinSpectralSeries(const std::vector<double>& input,
@@ -297,24 +297,28 @@ bool NearlyEqual(double lhs, double rhs) {
     return std::fabs(lhs - rhs) <= kFloatReadbackTolerance;
 }
 
-std::size_t DetermineChunkFrameTarget(std::int64_t frame_size_bytes) {
+std::size_t DetermineChunkFrameTarget(std::int64_t frame_size_bytes,
+                                      int configured_target_frames) {
+    const std::size_t default_target_frames =
+        configured_target_frames > 0
+            ? static_cast<std::size_t>(configured_target_frames)
+            : kDefaultChunkTargetFrames;
     if (frame_size_bytes <= 0) {
-        return static_cast<std::size_t>(kChunkTargetFrames);
+        return default_target_frames;
     }
 
     const std::size_t frame_bytes = static_cast<std::size_t>(frame_size_bytes);
     if (frame_bytes == 0) {
-        return static_cast<std::size_t>(kChunkTargetFrames);
+        return default_target_frames;
     }
 
-    const std::size_t target_bytes =
-        static_cast<std::size_t>(kChunkTargetFrames) * frame_bytes;
+    const std::size_t target_bytes = default_target_frames * frame_bytes;
     if (target_bytes <= kChunkMaxBytes) {
-        return static_cast<std::size_t>(kChunkTargetFrames);
+        return default_target_frames;
     }
 
     const std::size_t reduced = kChunkMaxBytes / frame_bytes;
-    return std::max<std::size_t>(16, reduced);
+    return std::max<std::size_t>(1, std::min(default_target_frames, reduced));
 }
 
 void LogReadoutTimeIfAvailable(ISpecSensorApi* api,
@@ -517,9 +521,17 @@ bool CaptureCore::CaptureSample(const AcquisitionJob& job, AcquisitionSummary* s
         }
     };
 
-    const std::size_t chunk_target_frames = DetermineChunkFrameTarget(snapshot.frame_size_bytes);
+    const std::size_t chunk_target_frames =
+        DetermineChunkFrameTarget(snapshot.frame_size_bytes, config_.save_block_frames);
     const std::size_t chunk_target_bytes =
         static_cast<std::size_t>(snapshot.frame_size_bytes) * chunk_target_frames;
+    {
+        std::ostringstream oss;
+        oss << "Work chunk target frames=" << chunk_target_frames
+            << " bytes=" << chunk_target_bytes
+            << " configured_frames=" << config_.save_block_frames;
+        LogInfo(oss.str());
+    }
     std::vector<std::uint8_t> chunk_bytes;
     chunk_bytes.reserve(chunk_target_bytes);
     std::int64_t chunk_frame_count = 0;
