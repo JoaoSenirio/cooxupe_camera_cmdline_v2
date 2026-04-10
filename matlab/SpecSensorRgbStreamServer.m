@@ -10,6 +10,9 @@ classdef SpecSensorRgbStreamServer < handle
         LightFrameCursor (1, 1) double = 0
         DarkFrameCursor (1, 1) double = 0
         PayloadClass (1, :) char = 'uint16'
+        MaxCubeBytes (1, 1) double = 512 * 1024 * 1024
+        StoreLightCube (1, 1) logical = true
+        StoreDarkCube (1, 1) logical = true
         LightCubeRaw
         DarkCubeRaw
         RgbPreviewRaw
@@ -177,9 +180,28 @@ classdef SpecSensorRgbStreamServer < handle
             obj.ResolvedRgbBandIndices = obj.resolveRgbBandIndices(wavelengthsNm, obj.RgbTargetWavelengthNm);
             obj.ResolvedRgbBandWavelengthNm = wavelengthsNm(obj.ResolvedRgbBandIndices);
 
-            obj.LightCubeRaw = zeros(imageWidth, bandCount, expectedLightFrames, obj.PayloadClass);
-            obj.DarkCubeRaw = zeros(imageWidth, bandCount, expectedDarkFrames, obj.PayloadClass);
-            obj.RgbPreviewRaw = zeros(expectedLightFrames, imageWidth, 3, obj.PayloadClass);
+            lightCubeBytes = frameSizeBytes * expectedLightFrames;
+            darkCubeBytes = frameSizeBytes * expectedDarkFrames;
+            obj.StoreLightCube = lightCubeBytes > 0 && lightCubeBytes <= obj.MaxCubeBytes;
+            obj.StoreDarkCube = darkCubeBytes > 0 && darkCubeBytes <= obj.MaxCubeBytes;
+
+            if obj.StoreLightCube
+                obj.LightCubeRaw = zeros(imageWidth, bandCount, expectedLightFrames, obj.PayloadClass);
+            else
+                obj.LightCubeRaw = [];
+                fprintf("[matlab-stream] Skipping LightCubeRaw preallocation: %.2f GiB exceeds %.2f GiB limit\n", ...
+                    lightCubeBytes / (1024 ^ 3), obj.MaxCubeBytes / (1024 ^ 3));
+            end
+
+            if obj.StoreDarkCube
+                obj.DarkCubeRaw = zeros(imageWidth, bandCount, expectedDarkFrames, obj.PayloadClass);
+            else
+                obj.DarkCubeRaw = [];
+                fprintf("[matlab-stream] Skipping DarkCubeRaw preallocation: %.2f GiB exceeds %.2f GiB limit\n", ...
+                    darkCubeBytes / (1024 ^ 3), obj.MaxCubeBytes / (1024 ^ 3));
+            end
+
+            obj.RgbPreviewRaw = zeros(0, imageWidth, 3, obj.PayloadClass);
 
             obj.ensureFigure(imageWidth);
             obj.updateFigureTitle(sprintf("LIGHT aguardando | RGB alvo=[%d %d %d]nm | bandas=[%.2f %.2f %.2f]nm", ...
@@ -207,7 +229,9 @@ classdef SpecSensorRgbStreamServer < handle
             if isDark
                 startIndex = obj.DarkFrameCursor + 1;
                 endIndex = obj.DarkFrameCursor + frameCount;
-                obj.DarkCubeRaw(:, :, startIndex:endIndex) = block;
+                if obj.StoreDarkCube
+                    obj.DarkCubeRaw(:, :, startIndex:endIndex) = block;
+                end
                 obj.DarkFrameCursor = endIndex;
                 obj.updateFigureTitle(sprintf("DARK recebidos=%d", obj.DarkFrameCursor));
                 return;
@@ -215,11 +239,19 @@ classdef SpecSensorRgbStreamServer < handle
 
             startIndex = obj.LightFrameCursor + 1;
             endIndex = obj.LightFrameCursor + frameCount;
-            obj.LightCubeRaw(:, :, startIndex:endIndex) = block;
+            if obj.StoreLightCube
+                obj.LightCubeRaw(:, :, startIndex:endIndex) = block;
+            end
 
-            obj.RgbPreviewRaw(startIndex:endIndex, :, 1) = permute(block(:, obj.ResolvedRgbBandIndices(1), :), [3 1 2]);
-            obj.RgbPreviewRaw(startIndex:endIndex, :, 2) = permute(block(:, obj.ResolvedRgbBandIndices(2), :), [3 1 2]);
-            obj.RgbPreviewRaw(startIndex:endIndex, :, 3) = permute(block(:, obj.ResolvedRgbBandIndices(3), :), [3 1 2]);
+            previewBlock = zeros(frameCount, obj.Job.image_width, 3, obj.PayloadClass);
+            previewBlock(:, :, 1) = permute(block(:, obj.ResolvedRgbBandIndices(1), :), [3 1 2]);
+            previewBlock(:, :, 2) = permute(block(:, obj.ResolvedRgbBandIndices(2), :), [3 1 2]);
+            previewBlock(:, :, 3) = permute(block(:, obj.ResolvedRgbBandIndices(3), :), [3 1 2]);
+            if isempty(obj.RgbPreviewRaw)
+                obj.RgbPreviewRaw = previewBlock;
+            else
+                obj.RgbPreviewRaw = cat(1, obj.RgbPreviewRaw, previewBlock);
+            end
             obj.LightFrameCursor = endIndex;
 
             obj.renderCurrentImage();
@@ -323,6 +355,8 @@ classdef SpecSensorRgbStreamServer < handle
             obj.RgbTargetWavelengthNm = [0 0 0];
             obj.ResolvedRgbBandIndices = [1 1 1];
             obj.ResolvedRgbBandWavelengthNm = [0 0 0];
+            obj.StoreLightCube = true;
+            obj.StoreDarkCube = true;
         end
 
         function className = classForByteDepth(~, byteDepth)
