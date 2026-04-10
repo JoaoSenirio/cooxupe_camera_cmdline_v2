@@ -305,7 +305,9 @@ classdef SpecSensorRgbStreamServer < handle
         function ackBytes = buildAck(obj, success)
             statusValue = uint16(~success);
             ackBytes = zeros(obj.AckBytes, 1, "uint8");
-            ackBytes(1:4) = uint8("SSFA");
+            % Use char -> uint8 for compatibility with Matlab versions that
+            % do not support direct string -> uint8 conversion.
+            ackBytes(1:4) = uint8('SSFA').';
             ackBytes(5:6) = typecast(uint16(1), "uint8");
             ackBytes(7:8) = typecast(statusValue, "uint8");
         end
