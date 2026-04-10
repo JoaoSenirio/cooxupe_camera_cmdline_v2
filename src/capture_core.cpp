@@ -35,6 +35,36 @@ constexpr double kFloatReadbackTolerance = 1e-6;
 constexpr std::int64_t kChunkTargetFrames = 256;
 constexpr std::size_t kChunkMaxBytes = 512U * 1024U * 1024U;
 
+std::vector<double> RebinSpectralSeries(const std::vector<double>& input,
+                                        std::size_t target_count) {
+    if (input.empty() || target_count == 0) {
+        return {};
+    }
+    if (input.size() == target_count) {
+        return input;
+    }
+
+    std::vector<double> rebinned;
+    rebinned.reserve(target_count);
+    for (std::size_t i = 0; i < target_count; ++i) {
+        std::size_t begin = (i * input.size()) / target_count;
+        std::size_t end = ((i + 1) * input.size()) / target_count;
+        if (begin >= input.size()) {
+            begin = input.size() - 1;
+        }
+        if (end <= begin) {
+            end = std::min(input.size(), begin + 1);
+        }
+
+        double sum = 0.0;
+        for (std::size_t j = begin; j < end; ++j) {
+            sum += input[j];
+        }
+        rebinned.push_back(sum / static_cast<double>(end - begin));
+    }
+    return rebinned;
+}
+
 std::string MakeTimestamp() {
     const auto now = std::chrono::system_clock::now();
     const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
@@ -1307,6 +1337,15 @@ bool CaptureCore::FillSensorSnapshot(SensorSnapshot* snapshot) {
             }
         }
     }
+    if (!out.wavelengths_nm.empty() &&
+        out.wavelengths_nm.size() != static_cast<std::size_t>(out.image_height)) {
+        const std::size_t original_count = out.wavelengths_nm.size();
+        out.wavelengths_nm = RebinSpectralSeries(out.wavelengths_nm,
+                                                 static_cast<std::size_t>(out.image_height));
+        LogInfo("Normalized wavelength table from " + std::to_string(original_count) +
+                " to " + std::to_string(out.wavelengths_nm.size()) +
+                " entries to match effective band count");
+    }
 
     enum_count = 0;
     if (api_->GetEnumCount(L"Camera.FWHM", &enum_count) == 0 && enum_count > 0) {
@@ -1320,6 +1359,15 @@ bool CaptureCore::FillSensorSnapshot(SensorSnapshot* snapshot) {
                 }
             }
         }
+    }
+    if (!out.fwhm_nm.empty() &&
+        out.fwhm_nm.size() != static_cast<std::size_t>(out.image_height)) {
+        const std::size_t original_count = out.fwhm_nm.size();
+        out.fwhm_nm = RebinSpectralSeries(out.fwhm_nm,
+                                          static_cast<std::size_t>(out.image_height));
+        LogInfo("Normalized FWHM table from " + std::to_string(original_count) +
+                " to " + std::to_string(out.fwhm_nm.size()) +
+                " entries to match effective band count");
     }
 
     *snapshot = out;

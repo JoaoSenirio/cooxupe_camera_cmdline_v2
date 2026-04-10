@@ -59,7 +59,7 @@ inline AppConfig MakeDefaultConfig() {
     config.matlab_stream_port = 55001;
     config.matlab_stream_connect_timeout_ms = 200;
     config.matlab_stream_send_timeout_ms = 5000;
-    config.matlab_stream_queue_capacity = 8;
+    config.matlab_stream_queue_capacity = 50;
     return config;
 }
 

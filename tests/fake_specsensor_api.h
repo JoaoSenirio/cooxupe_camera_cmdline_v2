@@ -230,6 +230,18 @@ public:
             }
             return 0;
         }
+        if (feature == L"Camera.WavelengthTable") {
+            if (count != nullptr) {
+                *count = static_cast<int>(wavelength_table_values.size());
+            }
+            return 0;
+        }
+        if (feature == L"Camera.FWHM") {
+            if (count != nullptr) {
+                *count = static_cast<int>(fwhm_values.size());
+            }
+            return 0;
+        }
         if (count != nullptr) {
             *count = 0;
         }
@@ -243,6 +255,24 @@ public:
             }
             if (value != nullptr) {
                 *value = trigger_modes[static_cast<std::size_t>(index)];
+            }
+            return 0;
+        }
+        if (feature == L"Camera.WavelengthTable") {
+            if (index < 0 || index >= static_cast<int>(wavelength_table_values.size())) {
+                return -2;
+            }
+            if (value != nullptr) {
+                *value = wavelength_table_values[static_cast<std::size_t>(index)];
+            }
+            return 0;
+        }
+        if (feature == L"Camera.FWHM") {
+            if (index < 0 || index >= static_cast<int>(fwhm_values.size())) {
+                return -2;
+            }
+            if (value != nullptr) {
+                *value = fwhm_values[static_cast<std::size_t>(index)];
             }
             return 0;
         }
@@ -337,6 +367,8 @@ public:
     std::vector<std::wstring> commands;
     std::vector<std::wstring> operations;
     std::vector<std::wstring> trigger_modes{L"Internal", L"External"};
+    std::vector<std::wstring> wavelength_table_values;
+    std::vector<std::wstring> fwhm_values;
     int trigger_mode_index = 0;
 
 private:

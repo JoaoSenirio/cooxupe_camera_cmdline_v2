@@ -1,3 +1,4 @@
+#include <cmath>
 #include <iostream>
 
 #include "capture_core.h"
@@ -85,6 +86,55 @@ int TestPhaseFpsLoggingFallsBackWhenSdkMetricIsUnavailable() {
     return 0;
 }
 
+int TestWorkflowNormalizesSpectralMetadataToEffectiveBandCount() {
+    AppConfig config = MakeTestConfig("specsensor_cli_test_binned_wavelengths");
+    RemoveLogFileIfExists(config.log_file_path);
+
+    FakeSpecSensorApi api;
+    api.wait_delay_us = 1000;
+    api.image_width = 4;
+    api.image_height = 2;
+    api.frame_size_bytes = 16;
+    api.wavelength_table_values = {L"500.0", L"510.0", L"520.0", L"530.0"};
+    api.fwhm_values = {L"10.0", L"12.0", L"14.0", L"16.0"};
+
+    CaptureCore core(config, &api);
+    TEST_ASSERT(core.Initialize(), "CaptureCore initialize should succeed");
+
+    bool saw_begin = false;
+    WorkItem begin_item;
+    core.set_work_sink([&](WorkItem item) {
+        if (item.type == WorkItemType::BeginJob) {
+            begin_item = item;
+            saw_begin = true;
+        }
+        return true;
+    });
+
+    AcquisitionJob job;
+    job.sample_name = "sample-binned";
+    AcquisitionSummary captured_summary;
+    TEST_ASSERT(core.CaptureSample(job, &captured_summary), "capture sample should succeed");
+    core.Shutdown();
+
+    TEST_ASSERT(saw_begin, "work sink must receive BeginJob");
+    TEST_ASSERT(begin_item.begin.sensor.image_height == 2, "effective image_height must be preserved");
+    TEST_ASSERT(begin_item.begin.sensor.wavelengths_nm.size() == 2,
+                "wavelength table must match effective band count");
+    TEST_ASSERT(begin_item.begin.sensor.fwhm_nm.size() == 2,
+                "FWHM table must match effective band count");
+    TEST_ASSERT(std::fabs(begin_item.begin.sensor.wavelengths_nm[0] - 505.0) < 1e-9,
+                "first rebinned wavelength must be averaged");
+    TEST_ASSERT(std::fabs(begin_item.begin.sensor.wavelengths_nm[1] - 525.0) < 1e-9,
+                "second rebinned wavelength must be averaged");
+    TEST_ASSERT(std::fabs(begin_item.begin.sensor.fwhm_nm[0] - 11.0) < 1e-9,
+                "first rebinned fwhm must be averaged");
+    TEST_ASSERT(std::fabs(begin_item.begin.sensor.fwhm_nm[1] - 15.0) < 1e-9,
+                "second rebinned fwhm must be averaged");
+    TEST_ASSERT(captured_summary.pass, "summary should still pass");
+    return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -93,5 +143,7 @@ int main() {
          TestWorkflowKeepsLightDarkSequenceAndSummary},
         {"PhaseFpsLoggingFallsBackWhenSdkMetricIsUnavailable",
          TestPhaseFpsLoggingFallsBackWhenSdkMetricIsUnavailable},
+        {"WorkflowNormalizesSpectralMetadataToEffectiveBandCount",
+         TestWorkflowNormalizesSpectralMetadataToEffectiveBandCount},
     });
 }
