@@ -59,7 +59,7 @@ Os valores abaixo vêm de `MakeDefaultConfig()`.
 | `matlab_stream_port` | `55001` | porta TCP |
 | `matlab_stream_connect_timeout_ms` | `200` | timeout de conexão |
 | `matlab_stream_send_timeout_ms` | `200` | timeout de envio e leitura de ACK |
-| `matlab_stream_queue_capacity` | `8` | existe na config, mas não define a capacidade real da fila compartilhada |
+| `matlab_stream_queue_capacity` | `8` | capacidade efetiva da `SharedWorkQueue` quando Matlab está habilitado |
 
 ## Regras de validação relevantes
 
@@ -132,9 +132,9 @@ O número real de frames por chunk é calculado assim:
 A capacidade da fila compartilhada não é sempre a mesma da config:
 
 - sem Matlab: `save_queue_capacity`
-- com Matlab: `3`
+- com Matlab: `matlab_stream_queue_capacity`
 
-Logo, o stream Matlab usa uma fila efetiva muito menor do que a config sugere.
+Logo, o stream Matlab usa a capacidade específica configurada para esse fluxo.
 
 ### Máscaras de consumidor
 
@@ -185,8 +185,7 @@ Logo, o stream Matlab usa uma fila efetiva muito menor do que a config sugere.
 
 - É validado em `ValidateConfig(...)`.
 - Tem default `8`.
-- O valor é passado ao construtor de `FrameStreamCore`, mas não altera a capacidade efetiva da fila.
-- Com Matlab ativo, a `SharedWorkQueue` é criada com capacidade fixa `3`.
+- Com Matlab ativo, `main` usa esse valor como capacidade efetiva da `SharedWorkQueue`.
 
 ### `min_buffers_required`
 

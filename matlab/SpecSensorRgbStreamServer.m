@@ -15,6 +15,7 @@ classdef SpecSensorRgbStreamServer < handle
         MaxCubeBytes (1, 1) double = 512 * 1024 * 1024
         StoreLightCube (1, 1) logical = true
         StoreDarkCube (1, 1) logical = true
+        CallbackArmed (1, 1) logical = false
         LightCubeRaw
         DarkCubeRaw
         RgbPreviewRaw
@@ -45,7 +46,7 @@ classdef SpecSensorRgbStreamServer < handle
             obj.logf("start requested host=%s port=%d", obj.Host, obj.Port);
             obj.Server = tcpserver(obj.Host, obj.Port, "ConnectionChangedFcn", ...
                 @(src, evt)obj.handleConnectionChanged(src, evt));
-            configureCallback(obj.Server, "byte", obj.HeaderBytes, @(src, evt)obj.handleData(src, evt));
+            obj.armReadCallback();
             obj.logf("Listening on %s:%d header_bytes=%d ack_bytes=%d", ...
                 obj.Host, obj.Port, obj.HeaderBytes, obj.AckBytes);
         end
@@ -57,7 +58,7 @@ classdef SpecSensorRgbStreamServer < handle
         function stop(obj)
             if ~isempty(obj.Server) && isvalid(obj.Server)
                 obj.logf("stop requested");
-                configureCallback(obj.Server, "off");
+                obj.disarmReadCallback();
                 server = obj.Server;
                 obj.Server = [];
                 clear server;
@@ -77,7 +78,6 @@ classdef SpecSensorRgbStreamServer < handle
 
         function handleData(obj, src, ~)
             if src.NumBytesAvailable <= 0
-                obj.logf("handleData invoked with no available bytes");
                 return;
             end
 
@@ -408,6 +408,8 @@ classdef SpecSensorRgbStreamServer < handle
             obj.logf("writeAck start type=%d(%s) status=%d bytes=%s", ...
                 messageType, obj.messageTypeName(messageType), uint16(~success), ...
                 obj.bytesToHex(ackBytes));
+            obj.disarmReadCallback();
+            callbackRestore = onCleanup(@() obj.armReadCallback()); %#ok<NASGU>
             write(src, ackBytes, "uint8");
             obj.logf("writeAck done type=%d(%s) status=%d elapsed_ms=%.3f", ...
                 messageType, obj.messageTypeName(messageType), uint16(~success), ...
@@ -512,6 +514,31 @@ classdef SpecSensorRgbStreamServer < handle
 
             timestamp = datestr(now, 'yyyy-mm-dd HH:MM:SS.FFF');
             fprintf('[matlab-stream] [%s] %s\n', timestamp, sprintf(varargin{:}));
+        end
+
+        function armReadCallback(obj)
+            if isempty(obj.Server) || ~isvalid(obj.Server)
+                return;
+            end
+            if obj.CallbackArmed
+                return;
+            end
+            configureCallback(obj.Server, "byte", obj.HeaderBytes, @(src, evt)obj.handleData(src, evt));
+            obj.CallbackArmed = true;
+            obj.logf("read callback armed count=%d", obj.HeaderBytes);
+        end
+
+        function disarmReadCallback(obj)
+            if isempty(obj.Server) || ~isvalid(obj.Server)
+                obj.CallbackArmed = false;
+                return;
+            end
+            if ~obj.CallbackArmed
+                return;
+            end
+            configureCallback(obj.Server, "off");
+            obj.CallbackArmed = false;
+            obj.logf("read callback disarmed");
         end
     end
 end

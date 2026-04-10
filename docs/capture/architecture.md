@@ -294,12 +294,12 @@ Esse é o mecanismo que propaga falhas de save ou stream para o processo princip
 Existe uma distinção importante entre configuração e runtime real:
 
 - quando `matlab_stream_enabled == false`, `main` cria a `SharedWorkQueue` com capacidade `save_queue_capacity`;
-- quando `matlab_stream_enabled == true`, `main` força a capacidade da fila compartilhada para `3`.
+- quando `matlab_stream_enabled == true`, `main` cria a `SharedWorkQueue` com capacidade `matlab_stream_queue_capacity`.
 
 Logo:
 
-- com Matlab ativo, a fila compartilhada real não usa `matlab_stream_queue_capacity`;
-- o throughput do workflow passa a depender de uma janela pequena de três itens pendentes.
+- com Matlab ativo, o tamanho da janela pendente passa a depender diretamente de `matlab_stream_queue_capacity`;
+- aumentar esse valor reduz a chance de a captura falhar por backpressure imediato do stream.
 
 ## Persistência em disco no fluxo geral
 

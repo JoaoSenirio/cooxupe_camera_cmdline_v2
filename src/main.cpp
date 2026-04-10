@@ -165,7 +165,9 @@ int RunApplication(const std::vector<std::string>& args) {
                                         SharedWorkQueue::kConsumerStreamMask)
             : SharedWorkQueue::kConsumerSaveMask;
     const std::size_t shared_queue_capacity =
-        config.matlab_stream_enabled ? 3U : static_cast<std::size_t>(config.save_queue_capacity);
+        config.matlab_stream_enabled
+            ? static_cast<std::size_t>(config.matlab_stream_queue_capacity)
+            : static_cast<std::size_t>(config.save_queue_capacity);
     SharedWorkQueue work_queue(shared_queue_capacity, consumer_mask);
 
     SaveCore save_core(static_cast<std::size_t>(config.save_queue_capacity),
